@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sa-token-python"
+version = "0.1.2"
+description = "sa-token-python-core 的常用安装入口：核心 + Redis / JWT。Web 框架请按 extras 安装。"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "sa-token-python contributors" }]
+keywords = ["auth", "authentication", "authorization", "token", "rbac", "sa-token"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Session",
+    "Typing :: Typed",
+]
+dependencies = [
+    "sa-token-python-core[redis,jwt]==0.1.2",
+]
+
+[project.optional-dependencies]
+redis = ["sa-token-python-core[redis]==0.1.2"]
+jwt = ["sa-token-python-core[jwt]==0.1.2"]
+fastapi = ["sa-token-python-core[fastapi]==0.1.2"]
+starlette = ["sa-token-python-core[starlette]==0.1.2"]
+flask = ["sa-token-python-core[flask]==0.1.2"]
+django = ["sa-token-python-core[django]==0.1.2"]
+full = ["sa-token-python-core[full]==0.1.2"]
+
+[project.urls]
+Homepage = "https://github.com/Star-yb/sa-token-python"
+Documentation = "https://github.com/Star-yb/sa-token-python"
+Source = "https://github.com/Star-yb/sa-token-python"
+Issues = "https://github.com/Star-yb/sa-token-python/issues"
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/pyproject.toml",
+    "/README.md",
+]

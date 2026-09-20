@@ -22,7 +22,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
 
 __all__ = ["SaTokenManager", "SaTokenBuilder", "SaToken", "__version__"]
 
-__version__ = "0.1.2"
+__version__ = "0.1.5"
 
 _BANNER = r"""
    _____         ______      __

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sa-token-python-core"
-version = "0.1.2"
+version = "0.1.5"
 description = "有状态 Token 认证与权限鉴权框架（轻量核心）。灵感来源于 Java 的 Sa-Token。常用依赖请安装 sa-token-python；Web 框架按 extras 安装。"
 readme = "README.md"
 requires-python = ">=3.10"

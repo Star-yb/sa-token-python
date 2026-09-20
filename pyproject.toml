@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sa-token-python-core"
+version = "0.1.2"
+description = "有状态 Token 认证与权限鉴权框架（轻量核心）。灵感来源于 Java 的 Sa-Token。常用依赖请安装 sa-token-python；Web 框架按 extras 安装。"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "sa-token-python contributors" }]
+keywords = ["auth", "authentication", "authorization", "token", "rbac", "sa-token"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Session",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+redis = ["redis>=5"]
+jwt = ["pyjwt>=2"]
+fastapi = ["fastapi>=0.110"]
+starlette = ["starlette>=0.37"]
+flask = ["flask>=3"]
+django = ["django>=4.2"]
+full = [
+    "redis>=5",
+    "pyjwt>=2",
+    "fastapi>=0.110",
+    "starlette>=0.37",
+    "flask>=3",
+    "django>=4.2",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "fakeredis>=2.23",
+    "lupa>=2",
+    "httpx2>=0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Star-yb/sa-token-python"
+Documentation = "https://github.com/Star-yb/sa-token-python"
+Source = "https://github.com/Star-yb/sa-token-python"
+Issues = "https://github.com/Star-yb/sa-token-python/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sa_token"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/packages",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]

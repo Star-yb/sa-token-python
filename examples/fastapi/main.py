@@ -11,7 +11,14 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from sa_token import NotLoginException, NotLoginType, SaToken, SaTokenException, StpUtil, get_manager
+from sa_token import (
+    NotLoginException,
+    NotLoginType,
+    SaToken,
+    SaTokenException,
+    StpUtil,
+    get_manager,
+)
 from sa_token.integration.fastapi import (
     BearerLoginId,
     LoginId,

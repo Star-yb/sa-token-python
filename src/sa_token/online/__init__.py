@@ -192,7 +192,12 @@ class OnlineManager:
                 await self._sender(connection, message)
                 sent += 1
             except Exception as exc:
-                logger.warning("在线连接推送失败：login_id=%s device=%s", login_id, device, exc_info=exc)
+                logger.warning(
+                    "在线连接推送失败：login_id=%s device=%s",
+                    login_id,
+                    device,
+                    exc_info=exc,
+                )
                 continue
         return sent
 

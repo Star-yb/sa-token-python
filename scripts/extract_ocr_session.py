@@ -70,7 +70,10 @@ def render_report(
         "",
         f"来源：`{session_path}`",
         "",
-        f"已提交意见 {len(comments)} 条。这些是模型调用 `code_comment` 时写下的内容，扫描被中断后没有进入最终 json。",
+        (
+            f"已提交意见 {len(comments)} 条。"
+            "这些是模型调用 `code_comment` 时写下的内容，扫描被中断后没有进入最终 json。"
+        ),
         "",
     ]
     for severity in SEVERITY_ORDER:

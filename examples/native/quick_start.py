@@ -66,7 +66,7 @@ async def main() -> None:
         await StpUtil.check_login(token)
     except NotLoginException as exc:
         if exc.type is not NotLoginType.KICK_OUT:
-            raise AssertionError(f"expected KICK_OUT, got {exc.type}")
+            raise AssertionError(f"expected KICK_OUT, got {exc.type}") from exc
         print(f"  被踢原因可追溯 -> {exc.type.value}")
     else:
         raise AssertionError("expected NotLoginException")

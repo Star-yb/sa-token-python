@@ -93,6 +93,8 @@ class TikStrategy(_OpaqueStrategy):
     name = "tik"
 
     def __init__(self, length: int = 8) -> None:
+        if length < 1:
+            raise ValueError("TikStrategy 的长度至少为 1")
         self.length = length
 
     def generate(self, login_id: str, extra: dict[str, Any] | None = None) -> str:

@@ -6,8 +6,10 @@ Server 与 Client 都只依赖核心存储与 ``StpLogic``，HTTP 跳转由使�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import random
 import secrets
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -132,7 +134,7 @@ class SsoServer:
     async def _register_service(self, login_id: str, service: str) -> None:
         """记录该用户在哪些应用登录过，统一登出时需要逐个通知。"""
         key = self._key("services", login_id)
-        for _ in range(12):
+        for attempt in range(12):
             raw = await self._storage.get(key)
             services = raw.split("\n") if raw else []
             if service in services:
@@ -144,6 +146,7 @@ class SsoServer:
                     return
             elif await self._storage.compare_and_set(key, raw, new_raw):
                 return
+            await asyncio.sleep(min(0.05, random.uniform(0.005, 0.02) * (2**attempt)))
         raise SsoError("并发登记 SSO service 失败，请稍后重试")
 
     async def get_registered_services(self, login_id: str) -> list[str]:

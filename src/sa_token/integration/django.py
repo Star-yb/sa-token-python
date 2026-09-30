@@ -7,13 +7,22 @@ Django 自带一套完整的 Session/User 体系，因此这里的定位是：
 
 from __future__ import annotations
 
+import asyncio
 import functools
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+try:
+    import django  # noqa: F401
+except ImportError as exc:  # pragma: no cover - 依赖缺失路径
+    raise ImportError(
+        "该模块需要 django，请执行：pip install django"
+    ) from exc
+
 from ..adapter.http import HttpContext
 from ..adapter.path import PathAuthConfig
 from ..adapter.pipeline import build_rule, resolve_token, run_auth_flow, run_path_auth
+from ..context import clear_current, set_current
 from ..exception import SaTokenException
 from ..permission import MatchMode
 from ..stp_util import get_manager
@@ -86,13 +95,15 @@ class SaTokenDjangoMiddleware:
             if PATH_AUTH is None:
                 resolve_token(ctx, manager)
             else:
-                run_sync(run_path_auth(ctx, manager, PATH_AUTH))
+                result = run_sync(run_path_auth(ctx, manager, PATH_AUTH))
+                set_current(result.token, result.login_id)
+            request.sa_token = ctx.state.get("stp_token")
+            request.sa_login_id = ctx.state.get("stp_login_id")
+            return self._get_response(request)
         except SaTokenException as exc:
             return to_json_response(exc)
-
-        request.sa_token = ctx.state.get("stp_token")
-        request.sa_login_id = ctx.state.get("stp_login_id")
-        return self._get_response(request)
+        finally:
+            clear_current()
 
     def process_exception(self, request: Any, exception: Exception) -> Any:
         if isinstance(exception, SaTokenException):
@@ -100,8 +111,43 @@ class SaTokenDjangoMiddleware:
         return None
 
 
+def _bind_and_call(
+    view: Callable[..., Any],
+    request: Any,
+    result: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    request.sa_login_id = result.login_id
+    request.sa_token = result.token
+    set_current(result.token, result.login_id)
+    try:
+        return view(request, *args, **kwargs)
+    finally:
+        clear_current()
+
+
 def _guard(rule_factory: Callable[[], Any]) -> Callable[[_F], _F]:
     def decorator(view: _F) -> _F:
+        if asyncio.iscoroutinefunction(view):
+
+            @functools.wraps(view)
+            async def async_wrapper(request: Any, *args: Any, **kwargs: Any) -> Any:
+                ctx = DjangoHttpContext(request)
+                try:
+                    result = await run_auth_flow(ctx, get_manager(), rule_factory())
+                except SaTokenException as exc:
+                    return to_json_response(exc)
+                request.sa_login_id = result.login_id
+                request.sa_token = result.token
+                set_current(result.token, result.login_id)
+                try:
+                    return await view(request, *args, **kwargs)
+                finally:
+                    clear_current()
+
+            return async_wrapper  # type: ignore[return-value]
+
         @functools.wraps(view)
         def wrapper(request: Any, *args: Any, **kwargs: Any) -> Any:
             ctx = DjangoHttpContext(request)
@@ -109,9 +155,7 @@ def _guard(rule_factory: Callable[[], Any]) -> Callable[[_F], _F]:
                 result = run_sync(run_auth_flow(ctx, get_manager(), rule_factory()))
             except SaTokenException as exc:
                 return to_json_response(exc)
-            request.sa_login_id = result.login_id
-            request.sa_token = result.token
-            return view(request, *args, **kwargs)
+            return _bind_and_call(view, request, result, args, kwargs)
 
         return wrapper  # type: ignore[return-value]
 

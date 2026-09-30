@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from sa_token import (
@@ -10,6 +12,32 @@ from sa_token import (
     NotRoleException,
     NotSafeException,
 )
+from sa_token.model import SessionData, TokenInfo
+
+
+def test_non_string_state_is_not_treated_as_offline() -> None:
+    info = TokenInfo.from_json('{"login_id":"1","state":["kickout"]}')
+    assert info is not None
+    assert info.is_offline is False
+
+
+def test_session_from_json_skips_bad_terminals_and_null_data() -> None:
+    raw = json.dumps(
+        {
+            "id": "1",
+            "data": None,
+            "terminal_list": [None, {"device": "web"}, {"token": "abc"}],
+            "create_time": "yesterday",
+            "history_terminal_count": "nope",
+        }
+    )
+    session = SessionData.from_json(raw)
+    assert session is not None
+    assert session.data == {}
+    assert [item.token for item in session.terminal_list] == ["abc"]
+    assert session.history_terminal_count == 1
+
+    assert SessionData.from_json('{"id":"1","terminal_list":"bad"}') is None
 
 
 async def test_permissions_support_wildcard(stp) -> None:
@@ -86,6 +114,39 @@ async def test_session_roundtrip(stp) -> None:
     assert await reloaded.get("nickname") == "alice"
 
 
+async def test_stale_session_save_keeps_other_writers(stp) -> None:
+    web = await stp.login("10001", device="web")
+    stale = await stp.get_session("10001")
+    assert stale is not None
+    app = await stp.login("10001", device="app")
+    await stale.set("nickname", "alice")
+
+    assert await stp.is_login(web) is True
+    assert await stp.is_login(app) is True
+    reloaded = await stp.get_session("10001")
+    assert reloaded is not None
+    assert await reloaded.get("nickname") == "alice"
+    tokens = {item.token for item in reloaded.terminal_list}
+    assert web in tokens
+    assert app in tokens
+
+
+async def test_stale_session_save_does_not_restore_logged_out_terminal(stp) -> None:
+    web = await stp.login("10001", device="web")
+    app = await stp.login("10001", device="app")
+    stale = await stp.get_session("10001")
+    assert stale is not None
+    await stp.logout_by_token(web)
+    await stale.set("nickname", "alice")
+
+    reloaded = await stp.get_session("10001")
+    assert reloaded is not None
+    assert await reloaded.get("nickname") == "alice"
+    tokens = {item.token for item in reloaded.terminal_list}
+    assert web not in tokens
+    assert app in tokens
+
+
 async def test_session_not_created_when_create_false(stp) -> None:
     assert await stp.get_session(99999, create=False) is None
 
@@ -98,6 +159,12 @@ async def test_token_session_is_bound_to_single_token(stp) -> None:
 
     await stp.logout_by_token(token)
     assert await stp.get_token_session(token) is None
+
+
+def test_permanent_disable_message_does_not_show_sentinel() -> None:
+    exception = DisableException("10001", "login", 1, -1)
+    assert "永久" in exception.message
+    assert "-1" not in exception.message
 
 
 async def test_disable_blocks_login(stp) -> None:

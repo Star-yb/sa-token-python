@@ -9,10 +9,56 @@ import pytest
 from sa_token.adapter import SimpleHttpContext
 from sa_token.exception import NotLoginException
 from sa_token.oauth2 import OAuth2Client, OAuth2Error, OAuth2Server, generate_pkce_pair
+from sa_token.oauth2.model import AccessTokenInfo, AuthorizationCode
 from sa_token.online import OnlineManager, WebSocketAuthenticator
 from sa_token.sso import SsoClient, SsoConfig, SsoError, SsoServer
 
 # ----------------------------------------------------------------- OAuth2
+
+
+def test_oauth2_client_rejects_string_collections() -> None:
+    raw = (
+        '{"client_id":"web","redirect_uris":"https://app.example/cb",'
+        '"grant_types":["authorization_code"],"scopes":["read"]}'
+    )
+    assert OAuth2Client.from_json(raw) is None
+
+
+async def test_plain_pkce_is_rejected_unless_enabled(manager) -> None:
+    server = OAuth2Server(manager)
+    await server.register_client(
+        OAuth2Client(
+            client_id="web",
+            client_secret="secret",
+            redirect_uris=["https://app.example/callback"],
+            grant_types=["authorization_code"],
+            scopes=["read"],
+        )
+    )
+    with pytest.raises(OAuth2Error, match="plain"):
+        await server.create_authorization_code(
+            client_id="web",
+            login_id="10001",
+            redirect_uri="https://app.example/callback",
+            scopes=["read"],
+            code_challenge="challenge",
+            code_challenge_method="plain",
+        )
+    with pytest.raises(OAuth2Error, match="未知"):
+        await server.create_authorization_code(
+            client_id="web",
+            login_id="10001",
+            redirect_uri="https://app.example/callback",
+            scopes=["read"],
+            code_challenge="challenge",
+            code_challenge_method="S512",
+        )
+
+
+def test_oauth2_from_json_rejects_incomplete_payload() -> None:
+    assert AuthorizationCode.from_json('{"code":"abc"}') is None
+    assert AccessTokenInfo.from_json('{"access_token":"abc"}') is None
+    assert OAuth2Client.from_json('{"name":"web"}') is None
 
 
 @pytest.fixture
@@ -56,7 +102,26 @@ async def test_authorization_code_is_single_use(oauth2) -> None:
         redirect_uri="https://app.example/callback",
     )
     await oauth2.exchange_code_for_token(
-        code=code.code, client_id="web-app", client_secret="secret-123"
+        code=code.code,
+        client_id="web-app",
+        client_secret="secret-123",
+        redirect_uri="https://app.example/callback",
+    )
+    with pytest.raises(OAuth2Error) as excinfo:
+        await oauth2.exchange_code_for_token(
+            code=code.code,
+            client_id="web-app",
+            client_secret="secret-123",
+            redirect_uri="https://app.example/callback",
+        )
+    assert excinfo.value.error == "invalid_grant"
+
+
+async def test_exchange_requires_redirect_uri(oauth2) -> None:
+    code = await oauth2.create_authorization_code(
+        client_id="web-app",
+        login_id="10001",
+        redirect_uri="https://app.example/callback",
     )
     with pytest.raises(OAuth2Error) as excinfo:
         await oauth2.exchange_code_for_token(
@@ -110,7 +175,10 @@ async def test_public_client_requires_pkce(manager) -> None:
         code_challenge=challenge,
     )
     tokens = await server.exchange_code_for_token(
-        code=code.code, client_id="spa", code_verifier=verifier
+        code=code.code,
+        client_id="spa",
+        redirect_uri="https://spa.example/cb",
+        code_verifier=verifier,
     )
     assert tokens.access_token
 
@@ -129,7 +197,10 @@ async def test_pkce_wrong_verifier_rejected(manager) -> None:
     )
     with pytest.raises(OAuth2Error):
         await server.exchange_code_for_token(
-            code=code.code, client_id="spa", code_verifier="wrong-verifier"
+            code=code.code,
+            client_id="spa",
+            redirect_uri="https://spa.example/cb",
+            code_verifier="wrong-verifier",
         )
 
 
@@ -138,7 +209,10 @@ async def test_refresh_token_rotates(oauth2) -> None:
         client_id="web-app", login_id="10001", redirect_uri="https://app.example/callback"
     )
     first = await oauth2.exchange_code_for_token(
-        code=code.code, client_id="web-app", client_secret="secret-123"
+        code=code.code,
+        client_id="web-app",
+        client_secret="secret-123",
+        redirect_uri="https://app.example/callback",
     )
     second = await oauth2.refresh_access_token(
         refresh_token=first.refresh_token, client_id="web-app", client_secret="secret-123"
@@ -157,11 +231,20 @@ async def test_access_token_can_be_revoked(oauth2) -> None:
         client_id="web-app", login_id="10001", redirect_uri="https://app.example/callback"
     )
     tokens = await oauth2.exchange_code_for_token(
-        code=code.code, client_id="web-app", client_secret="secret-123"
+        code=code.code,
+        client_id="web-app",
+        client_secret="secret-123",
+        redirect_uri="https://app.example/callback",
     )
     assert await oauth2.revoke_token(tokens.access_token) is True
     with pytest.raises(OAuth2Error):
         await oauth2.verify_access_token(tokens.access_token)
+    with pytest.raises(OAuth2Error):
+        await oauth2.refresh_access_token(
+            refresh_token=tokens.refresh_token,
+            client_id="web-app",
+            client_secret="secret-123",
+        )
 
 
 async def test_scope_check(oauth2) -> None:
@@ -172,7 +255,10 @@ async def test_scope_check(oauth2) -> None:
         scopes=["read"],
     )
     tokens = await oauth2.exchange_code_for_token(
-        code=code.code, client_id="web-app", client_secret="secret-123"
+        code=code.code,
+        client_id="web-app",
+        client_secret="secret-123",
+        redirect_uri="https://app.example/callback",
     )
     await oauth2.check_scope(tokens.access_token, "read")
     with pytest.raises(OAuth2Error):
@@ -317,7 +403,10 @@ async def test_oauth2_concurrent_refresh_succeeds_once(oauth2) -> None:
         redirect_uri="https://app.example/callback",
     )
     first = await oauth2.exchange_code_for_token(
-        code=code.code, client_id="web-app", client_secret="secret-123"
+        code=code.code,
+        client_id="web-app",
+        client_secret="secret-123",
+        redirect_uri="https://app.example/callback",
     )
     results = await asyncio.gather(
         *(

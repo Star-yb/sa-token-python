@@ -7,6 +7,7 @@ Manager 负责组装：配置 + 存储 + Token 策略 + 事件总线 + 权限数
 from __future__ import annotations
 
 import sys
+from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any
 
 from .config import SaTokenConfig
@@ -22,7 +23,7 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
 
 __all__ = ["SaTokenManager", "SaTokenBuilder", "SaToken", "__version__"]
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 _BANNER = r"""
    _____         ______      __
@@ -195,8 +196,9 @@ class SaTokenBuilder:
 
     def set_option(self, **options: Any) -> SaTokenBuilder:
         """批量设置任意配置项，便于从配置文件加载。"""
+        known = {item.name for item in fields(self._config)}
         for key, value in options.items():
-            if not hasattr(self._config, key):
+            if key not in known:
                 raise ValueError(f"未知配置项：{key}")
             setattr(self._config, key, value)
         return self
@@ -215,17 +217,18 @@ class SaTokenBuilder:
     def build(self) -> SaTokenManager:
         storage = self._storage
         if storage is None:
-            # 不静默降级到内存：多进程部署下会出现「登录了但下个请求说没登录」。
-            from .storage.memory import MemoryStorage
-
-            storage = MemoryStorage()
-        self._config.__post_init__()
+            raise ValueError(
+                "未配置 Storage：请显式调用 .storage(...)"
+                "（如需单机内存存储，请显式传入 MemoryStorage()）"
+            )
+        config = replace(self._config, extra=dict(self._config.extra))
+        config.__post_init__()
         manager = SaTokenManager(
-            self._config,
+            config,
             storage,
             strategy=self._strategy,
             stp_interface=self._stp_interface,
-            events=self._events,
+            events=self._events.copy(),
         )
         if self._config.is_print_banner:
             manager.print_banner()

@@ -1,0 +1,42 @@
+{
+  "status": "success",
+  "llm": {
+    "provider": "dashscope",
+    "model": "deepseek-v4-flash"
+  },
+  "summary": {
+    "files_reviewed": 1,
+    "comments": 1,
+    "total_tokens": 91677,
+    "input_tokens": 76795,
+    "output_tokens": 14882,
+    "cache_read_tokens": 56832,
+    "elapsed": "2m40s"
+  },
+  "tool_calls": {
+    "total": 5,
+    "by_tool": {
+      "code_comment": 1,
+      "code_search": 2,
+      "file_read": 2
+    },
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [
+    {
+      "path": "src/sa_token/storage/redis.py",
+      "content": "`_normalize_ttl` silently converts `ttl=0` to `1` second, which is undocumented and may conflict with caller expectations.\n\n**Why this is problematic:**\n- The function's docstring only documents `None` and `-1` as \"no expiration\" values, but says nothing about `0`.\n- In the base protocol (`base.py` line 22), the contract states that `None` and `-1` both mean \"never expire\", leaving `0` with ambiguous semantics.\n- Some callers might assume `ttl=0` means \"never expire\" (a convention seen in some APIs and databases where 0 = unlimited).\n- Other callers might assume `ttl=0` means \"expire immediately\".\n- The current behavior silently converts 0 to 1 (one second TTL), which is neither documented nor obvious.\n\n**Suggestion:** Either:\n1. Treat `ttl=0` as another \"never expire\" sentinel (alongside `None` and `-1`) for consistency with certain Redis client conventions, **or**\n2. Raise a `ValueError` to reject ambiguous `ttl=0` values explicitly so callers cannot silently get wrong behavior.\n\nAt minimum, document the behavior in the function's docstring.",
+      "suggestion_code": "def _normalize_ttl(ttl: int | None) -\u003e int | None:\n    \"\"\"\n    把 ``None`` / ``-1`` / ``0`` 统一为「不设置过期」。\n    正整数原样返回（至少 1 秒，Redis 不允许 EX 0）。\n    \"\"\"\n    if ttl is None or ttl == TTL_NEVER_EXPIRE or ttl == 0:\n        return None\n    return max(1, ttl)",
+      "existing_code": "def _normalize_ttl(ttl: int | None) -\u003e int | None:\n    \"\"\"把 ``None`` / ``-1`` 统一成「不设置过期」。\"\"\"\n    if ttl is None or ttl == TTL_NEVER_EXPIRE:\n        return None\n    return max(1, ttl)",
+      "start_line": 39,
+      "end_line": 43,
+      "thinking": "Let me now compile my findings and report them.\n\nThe main issues I've identified:\n\n1. **TTL=0 boundary behavior**: `_normalize_ttl` silently converts `ttl=0` to `1` (1 second), which is undocumented and may conflict with caller expectations. Some users might expect 0 to mean \"no expiration\" or \"expire immediately.\"\n\n2. I'll also check if the `scan` function has any subtle issues with the cursor type conversion.\n\nLet me report the issues now.",
+      "category": "bug",
+      "severity": "medium"
+    }
+  ],
+  "project_summary": "# Project-Level Review Summary\n\n## Top Issues\n\n1. **Silent `ttl=0` → `1` conversion in `_normalize_ttl`**  \n   - **File:** `src/sa_token/storage/redis.py`  \n   - The helper function `_normalize_ttl` treats `0` as an invalid expiration value and silently maps it to `1` second. This is undocumented (the docstring mentions only `None` and `-1` as “no expiration”) and conflicts with typical Redis semantics where `0` may mean “no expiry” or be a deliberate caller input.  \n   - **Impact:** Medium – callers relying on `ttl=0` to disable expiration will get a short-lived token instead, potentially causing authentication failures or confusing behavior. The silent behavior also makes debugging harder.\n\n## Module Hotspots\n\n- `src/sa_token/storage/redis.py` – The only file with review comments. While the issue is isolated, the module’s design around TTL normalization warrants attention because it may affect all callers of the storage layer.\n\n## Cross-Cutting Concerns\n\n- **Undocumented side effects** (single instance observed)  \n  The `_normalize_ttl` function’s silent transformation of `0` is an example of an implicit policy that is not surfaced to callers. Similar undocumented mappings or default behaviors may exist elsewhere in the codebase (e.g., in other storage backends or serialization helpers). This pattern should be reviewed broadly.\n\n## Quick Wins\n\n- **Fix the `_normalize_ttl` function**  \n  1. Update its docstring to document the behavior for `0` (or decide that `0` should mean “no expiration” and remove the silent conversion).  \n  2. Either explicitly accept `0` as valid (e.g., map it to `-1` or `None`), or raise a clear error if it is not supported.  \n  3. Add a unit test covering `ttl=0`, `ttl=None`, `ttl=-1`, and `ttl` greater than zero.  \n\n  **Effort:** Low (documentation + small code change + one test).  \n  **Leverage:** Prevents a silent bug that could affect all token creation flows.",
+  "session_id": "757a93e6-8957-4469-b6c8-9edc007a9795"
+}

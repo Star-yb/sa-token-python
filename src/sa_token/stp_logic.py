@@ -45,6 +45,17 @@ __all__ = ["StpLogic"]
 DEFAULT_DISABLE_SERVICE = "login"
 
 
+def _escape_glob(keyword: str) -> str:
+    """把 glob 元字符包进字符类，避免管理端搜索变成通配。"""
+    escaped: list[str] = []
+    for char in keyword:
+        if char in "*?[]\\":
+            escaped.append(f"[{char}]")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
+
+
 class StpLogic:
     """单个账号体系（``login_type``）的认证逻辑。
 
@@ -136,6 +147,7 @@ class StpLogic:
         *,
         device: str | None = None,
         timeout: int | None = None,
+        active_timeout: int | None = None,
         tag: str | None = None,
         extra: dict[str, Any] | None = None,
         token_value: str | None = None,
@@ -160,11 +172,12 @@ class StpLogic:
             normalized_id,
             device_name,
             effective_timeout,
+            active_timeout,
             tag,
             extra,
             token_value,
         )
-        await self._touch_active(token, effective_timeout)
+        await self._touch_active(token, effective_timeout, info)
 
         session.raw.history_terminal_count += 1
         session.raw.terminal_list.append(
@@ -186,6 +199,7 @@ class StpLogic:
         *,
         device: str | None = None,
         timeout: int | None = None,
+        active_timeout: int | None = None,
         tag: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> LoginTokenPair:
@@ -196,6 +210,7 @@ class StpLogic:
             normalized_id,
             device=device_name,
             timeout=timeout,
+            active_timeout=active_timeout,
             tag=tag,
             extra=extra,
         )
@@ -211,6 +226,7 @@ class StpLogic:
         login_id: str,
         device: str,
         timeout: int | None,
+        active_timeout: int | None,
         tag: str | None,
         extra: dict[str, Any] | None,
         token_value: str | None,
@@ -226,6 +242,7 @@ class StpLogic:
                 device=device,
                 login_type=self.login_type,
                 timeout=timeout,
+                active_timeout=active_timeout,
                 tag=tag,
             )
             if await self.storage.set_if_absent(self._token_key(token), info.to_json(), timeout):
@@ -292,6 +309,10 @@ class StpLogic:
         normalized_id = self.normalize_login_id(login_id)
         session = await self.get_session(normalized_id, create=False)
         if session is None:
+            if device is None:
+                await self._manager.refresh_tokens.revoke_all_for_login(
+                    self.login_type, normalized_id
+                )
             return
         removed = await self._remove_terminals(session, device, destroy=True)
         await self._save_or_drop_session(session, normalized_id)
@@ -366,6 +387,10 @@ class StpLogic:
         normalized_id = self.normalize_login_id(login_id)
         session = await self.get_session(normalized_id, create=False)
         if session is None:
+            if device is None:
+                await self._manager.refresh_tokens.revoke_all_for_login(
+                    self.login_type, normalized_id, logout_access=False
+                )
             return
         offline_count = await self._offline_terminals(session, normalized_id, device, state)
         await self._save_or_drop_session(session, normalized_id)
@@ -533,8 +558,17 @@ class StpLogic:
                 NotLoginType.TOKEN_FREEZE, login_type=self.login_type, token=token
             )
 
-    async def _touch_active(self, token: str, timeout: int | None) -> None:
-        if self.config.active_timeout < 0 and not self.config.dynamic_active_timeout:
+    async def _touch_active(
+        self,
+        token: str,
+        timeout: int | None,
+        info: TokenInfo | None = None,
+    ) -> None:
+        per_token = info.active_timeout if info is not None else None
+        if self.config.dynamic_active_timeout and per_token is not None and per_token >= 0:
+            await self.storage.set(self._last_active_key(token), str(now_ms()), timeout)
+            return
+        if self.config.active_timeout < 0:
             return
         await self.storage.set(self._last_active_key(token), str(now_ms()), timeout)
 
@@ -547,8 +581,11 @@ class StpLogic:
         """
         timeout = info.timeout if info.timeout is not None else self.config.timeout
         if timeout is not None and timeout >= 0:
-            await self._touch_active(token, timeout)
+            await self._touch_active(token, timeout, info)
         if not self.config.auto_renew or timeout is None or timeout < 0:
+            return
+        remaining = await self.storage.ttl(self._token_key(token))
+        if remaining >= 0 and remaining > timeout // 2:
             return
         await self.storage.expire(self._token_key(token), timeout)
         await self.storage.expire(self._session_key(info.login_id), timeout)
@@ -576,8 +613,9 @@ class StpLogic:
             if not create:
                 return None
             data = SessionData(id=normalized_id)
-            await self.storage.set(key, data.to_json(), self._session_ttl())
-        return SaSession(self.storage, key, data, self._session_ttl())
+            raw = data.to_json()
+            await self.storage.set(key, raw, self._session_ttl())
+        return SaSession(self.storage, key, data, self._session_ttl(), loaded_raw=raw)
 
     async def get_token_session(self, token: str | None = None) -> SaSession | None:
         token = token or get_current_token()
@@ -591,8 +629,9 @@ class StpLogic:
         data = SessionData.from_json(raw) if raw else None
         if data is None:
             data = SessionData(id=token)
-            await self.storage.set(key, data.to_json(), info.timeout)
-        return SaSession(self.storage, key, data, info.timeout)
+            raw = data.to_json()
+            await self.storage.set(key, raw, info.timeout)
+        return SaSession(self.storage, key, data, info.timeout, loaded_raw=raw)
 
     async def delete_session(self, login_id: Any) -> None:
         normalized_id = self.normalize_login_id(login_id)
@@ -881,7 +920,7 @@ class StpLogic:
         依赖存储的 ``scan``，在大规模 Redis 上属于重操作，不要放进请求热路径。
         """
         prefix = f"{self.config.key_prefix(self.login_type)}token:"
-        pattern = f"{prefix}*{keyword}*" if keyword else f"{prefix}*"
+        pattern = f"{prefix}*{_escape_glob(keyword)}*" if keyword else f"{prefix}*"
         found: list[str] = []
         cursor: str | None = None
         while True:
@@ -901,7 +940,7 @@ class StpLogic:
     ) -> list[str]:
         """管理端用：扫描 Account-Session ID。"""
         prefix = f"{self.config.key_prefix(self.login_type)}session:"
-        pattern = f"{prefix}*{keyword}*" if keyword else f"{prefix}*"
+        pattern = f"{prefix}*{_escape_glob(keyword)}*" if keyword else f"{prefix}*"
         found: list[str] = []
         cursor: str | None = None
         while True:

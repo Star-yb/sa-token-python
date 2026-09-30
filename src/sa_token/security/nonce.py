@@ -63,9 +63,13 @@ class NonceManager:
     def generate() -> str:
         return f"nonce_{now_ms()}_{secrets.token_urlsafe(24)}"
 
+    @staticmethod
+    def _normalize_subject(subject: str) -> str:
+        return str(subject).strip()
+
     async def issue(self, subject: str, *, purpose: str = "default") -> str:
         """签发短时 Nonce；极小概率随机冲突时自动重试。"""
-        normalized_subject = str(subject).strip()
+        normalized_subject = self._normalize_subject(subject)
         if not normalized_subject:
             raise SecurityException("INVALID_NONCE_SUBJECT", "nonce subject 不能为空")
         for _ in range(12):
@@ -84,9 +88,13 @@ class NonceManager:
         record = NonceRecord.from_json(raw)
         if record is None:
             raise SecurityException("INVALID_NONCE", "nonce 数据损坏")
-        if record.subject != str(subject) or record.purpose != purpose:
+        if record.state != "issued":
+            raise SecurityException("INVALID_NONCE", "nonce 无效、已使用或已过期")
+        if record.subject != self._normalize_subject(subject) or record.purpose != purpose:
             raise SecurityException("NONCE_MISMATCH", "nonce 与用户或业务不匹配")
         if not await self._storage.compare_and_delete(key, raw):
+            if not await self._storage.exists(key):
+                raise SecurityException("INVALID_NONCE", "nonce 无效、已使用或已过期")
             raise SecurityException("NONCE_REPLAYED", "nonce 已被其它请求使用")
 
     async def exists(self, nonce: str) -> bool:

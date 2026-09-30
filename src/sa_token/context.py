@@ -39,7 +39,11 @@ def set_current(token: str | None, login_id: str | None = None) -> tuple[Token, 
 
 
 def clear_current(tokens: tuple[Token, Token] | None = None) -> None:
-    """还原到绑定前的状态。"""
+    """清除或还原当前身份。
+
+    不传 ``tokens`` 时无条件把 token 和 login_id 清成 ``None``，供请求结束时使用。
+    传入 ``set_current`` 返回的重置令牌时，还原到绑定前的值。
+    """
     if tokens is None:
         _current_token.set(None)
         _current_login_id.set(None)
@@ -53,8 +57,9 @@ def clear_current(tokens: tuple[Token, Token] | None = None) -> None:
 def sa_token_context(token: str | None, login_id: str | None = None) -> Iterator[None]:
     """在一段代码内绑定身份，退出时自动还原。
 
-    同步与异步代码都能用（``with`` 与 ``async with`` 场景下 contextvars 的
-    传播规则一致），因此不必再提供一个异步版本。
+    同步与异步代码都用普通的 ``with``（本函数返回的是同步上下文管理器，
+    ``async with`` 会抛 TypeError）；contextvars 在两种场景下的传播规则一致，
+    因此不必再提供一个异步版本。
     """
     refs = set_current(token, login_id)
     try:

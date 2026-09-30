@@ -65,6 +65,56 @@ async def test_jwt_multi_login_gets_distinct_tokens(jwt_manager) -> None:
     assert first != second
 
 
+def test_jwt_extra_cannot_overwrite_reserved_claims() -> None:
+    from sa_token.strategy.jwt import JwtStrategy
+
+    strategy = JwtStrategy(JWT_SECRET, issuer="sa-token", audience="api")
+    token = strategy.generate(
+        "10001",
+        extra={
+            "loginId": "evil",
+            "jti": "fixed",
+            "iss": "other",
+            "aud": "other",
+            "iat": 1,
+            "role": "admin",
+        },
+    )
+
+    payload = pyjwt.decode(
+        token,
+        JWT_SECRET,
+        algorithms=["HS256"],
+        audience="api",
+        issuer="sa-token",
+    )
+    assert payload["loginId"] == "10001"
+    assert payload["iss"] == "sa-token"
+    assert payload["aud"] == "api"
+    assert payload["jti"] != "fixed"
+    assert payload["iat"] != 1
+    assert payload["role"] == "admin"
+
+
+def test_jwt_parse_only_swallows_decode_errors() -> None:
+    from sa_token.strategy.jwt import JwtStrategy
+
+    strategy = JwtStrategy(JWT_SECRET)
+    assert strategy.parse("not-a-jwt") is None
+
+    original_decode = strategy._jwt.decode
+
+    def raise_config_error(*args, **kwargs):
+        raise RuntimeError("bad config")
+
+    strategy._jwt.decode = raise_config_error
+    try:
+        with pytest.raises(RuntimeError, match="bad config"):
+            strategy.parse("token")
+    finally:
+        strategy._jwt.decode = original_decode
+
+
 def test_jwt_requires_secret_key() -> None:
     from sa_token.config import SaTokenConfig
     from sa_token.strategy import create_strategy
@@ -91,6 +141,8 @@ async def test_redis_storage_satisfies_contract(redis_storage) -> None:
     assert await redis_storage.exists("a") is True
 
     assert await redis_storage.set_if_absent("a", "2") is False
+    assert await redis_storage.set_if_absent("ephemeral", "v", 0) is False
+    assert await redis_storage.get("ephemeral") is None
     assert await redis_storage.compare_and_set("a", "1", "3") is True
     assert await redis_storage.get("a") == "3"
     assert await redis_storage.compare_and_delete("a", "3") is True

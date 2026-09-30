@@ -74,7 +74,10 @@ class NotLoginException(SaTokenException):
         login_type: str = "login",
         token: str | None = None,
     ) -> None:
-        super().__init__(_NOT_LOGIN_MESSAGES[not_login_type], login_type=login_type)
+        super().__init__(
+            _NOT_LOGIN_MESSAGES.get(not_login_type, "登录状态无效"),
+            login_type=login_type,
+        )
         self.type = not_login_type
         self.token = token
 
@@ -113,8 +116,9 @@ class DisableException(SaTokenException):
         *,
         login_type: str = "login",
     ) -> None:
+        remaining_text = "永久" if remaining < 0 else f"{remaining} 秒"
         super().__init__(
-            f"账号 {login_id} 的服务 {service} 已被封禁（等级 {level}，剩余 {remaining} 秒）",
+            f"账号 {login_id} 的服务 {service} 已被封禁（等级 {level}，剩余 {remaining_text}）",
             login_type=login_type,
         )
         self.login_id = login_id

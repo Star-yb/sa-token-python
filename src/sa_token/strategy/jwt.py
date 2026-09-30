@@ -3,7 +3,7 @@
 token 自带 claims，但校验时**仍然查存储**，因此踢人、顶号、封禁全部继续有效。
 这是刻意的取舍：纯无状态 JWT 无法在服务端即时作废，与本项目的核心语义冲突。
 
-需要额外安装：``pip install "sa-token-python-core[jwt]"``。
+需要额外安装：``pip install "sa-token-python[jwt]"``。
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class JwtStrategy:
             import jwt as pyjwt
         except ImportError as exc:  # pragma: no cover - 依赖缺失路径
             raise ImportError(
-                'JwtStrategy 需要 PyJWT 依赖，请执行：pip install "sa-token-python-core[jwt]"'
+                'JwtStrategy 需要 PyJWT 依赖，请执行：pip install "sa-token-python[jwt]"'
             ) from exc
         self._jwt = pyjwt
         self.secret_key = secret_key
@@ -54,7 +54,10 @@ class JwtStrategy:
         if self.audience:
             payload["aud"] = self.audience
         if extra:
-            payload.update(extra)
+            reserved = {"loginId", "iat", "jti", "iss", "aud"}
+            for key, value in extra.items():
+                if key not in reserved:
+                    payload[key] = value
         return self._jwt.encode(payload, self.secret_key, algorithm=self.algorithm)
 
     def parse(self, token: str) -> dict[str, Any] | None:
@@ -68,5 +71,5 @@ class JwtStrategy:
                 # 过期与否由存储层的 TTL 决定，避免两套过期时间互相打架。
                 options={"verify_exp": False},
             )
-        except Exception:
+        except self._jwt.exceptions.PyJWTError:
             return None

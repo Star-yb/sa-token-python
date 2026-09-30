@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 __all__ = [
     "NEVER_EXPIRE",
@@ -111,15 +111,30 @@ class SaTokenConfig:
     """给扩展模块（OAuth2 / SSO / 在线用户）放自定义配置。"""
 
     def __post_init__(self) -> None:
-        if not self.token_name:
+        if not self.token_name or not self.token_name.strip():
             raise ValueError("token_name 不能为空")
         if self.storage_key_prefix and not self.storage_key_prefix.endswith(":"):
             self.storage_key_prefix += ":"
+        if self.overflow_logout_mode not in get_args(OverflowLogoutMode):
+            raise ValueError(f"overflow_logout_mode 非法：{self.overflow_logout_mode!r}")
+        if self.replaced_range not in get_args(ReplacedRange):
+            raise ValueError(f"replaced_range 非法：{self.replaced_range!r}")
+        for name in ("timeout", "active_timeout", "offline_record_timeout", "perm_cache_timeout"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < NEVER_EXPIRE:
+                raise ValueError(f"{name} 非法：{value!r}")
 
     @classmethod
-    def from_dict(cls, values: dict[str, Any]) -> SaTokenConfig:
-        """从字典构造配置，忽略未知字段，便于对接外部配置中心。"""
+    def from_dict(cls, values: dict[str, Any], *, strict: bool = False) -> SaTokenConfig:
+        """从字典构造配置。
+
+        默认忽略未知字段，便于对接外部配置中心。``strict=True`` 时未知字段抛出
+        ``ValueError``，避免拼错的键被静默丢掉后仍使用默认值。
+        """
         known = {f.name for f in fields(cls)}
+        unknown = [key for key in values if key not in known]
+        if strict and unknown:
+            raise ValueError(f"未知配置项：{', '.join(unknown)}")
         return cls(**{key: value for key, value in values.items() if key in known})
 
     def key_prefix(self, login_type: str) -> str:

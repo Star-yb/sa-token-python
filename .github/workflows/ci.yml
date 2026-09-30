@@ -20,7 +20,7 @@ jobs:
       - name: Install package and test extras
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[fastapi,flask,jwt,dev]"
+          pip install -e ".[jwt,dev]" "fastapi>=0.110" "flask>=3"
       - name: Ruff
         run: ruff check .
       - name: Tests

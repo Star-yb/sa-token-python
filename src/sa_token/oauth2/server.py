@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import secrets
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,15 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
 
 __all__ = ["OAuth2Error", "OAuth2Server", "generate_pkce_pair"]
 
+logger = logging.getLogger("sa_token.oauth2")
+
+
+_OAUTH2_STATUS = {
+    "invalid_client": 401,
+    "invalid_token": 401,
+    "insufficient_scope": 403,
+}
+
 
 class OAuth2Error(SaTokenException):
     """OAuth2 协议错误，``error`` 为规范定义的错误码。"""
@@ -32,6 +42,7 @@ class OAuth2Error(SaTokenException):
         super().__init__(f"{error}: {description}")
         self.error = error
         self.description = description
+        self.http_status = _OAUTH2_STATUS.get(error, 400)
 
 
 def _s256(verifier: str) -> str:
@@ -52,11 +63,13 @@ class OAuth2Server:
         code_timeout: int = 300,
         access_token_timeout: int = 7200,
         refresh_token_timeout: int = 2592000,
+        allow_plain_pkce: bool = False,
     ) -> None:
         self._manager = manager
         self.code_timeout = code_timeout
         self.access_token_timeout = access_token_timeout
         self.refresh_token_timeout = refresh_token_timeout
+        self.allow_plain_pkce = allow_plain_pkce
 
     # 存储键 ---------------------------------------------------------------
 
@@ -85,6 +98,16 @@ class OAuth2Server:
             raise OAuth2Error("invalid_client", f"未注册的 client_id: {client_id}")
         return client
 
+    async def authenticate_client(
+        self,
+        client_id: str,
+        client_secret: str | None,
+    ) -> OAuth2Client:
+        """校验已注册客户端。机密客户端必须带正确的 client_secret。"""
+        client = await self._require_client(client_id)
+        self._verify_client_secret(client, client_secret)
+        return client
+
     # 授权码 ---------------------------------------------------------------
 
     async def create_authorization_code(
@@ -106,6 +129,7 @@ class OAuth2Server:
             raise OAuth2Error("unauthorized_client", "客户端不支持 authorization_code")
         if client.is_public and not code_challenge:
             raise OAuth2Error("invalid_request", "公开客户端必须使用 PKCE")
+        self._check_pkce_method(code_challenge_method)
 
         requested = list(scopes or client.scopes)
         invalid = [scope for scope in requested if scope not in client.scopes]
@@ -156,7 +180,9 @@ class OAuth2Server:
         authorization_code = await self._consume_code(code)
         if authorization_code.client_id != client_id:
             raise OAuth2Error("invalid_grant", "授权码不属于该客户端")
-        if redirect_uri is not None and authorization_code.redirect_uri != redirect_uri:
+        # 授权码签发时一定绑定了 redirect_uri。RFC 6749 4.1.3 要求换令牌时
+        # 原样带回并逐字比较，缺省不能兑换。
+        if redirect_uri is None or authorization_code.redirect_uri != redirect_uri:
             raise OAuth2Error("invalid_grant", "redirect_uri 与申请时不一致")
         self._verify_pkce(authorization_code, code_verifier)
 
@@ -187,10 +213,18 @@ class OAuth2Server:
         # 原子消费并轮转：并发刷新时只能有一个请求成功。
         if not await self._storage.compare_and_delete(key, raw):
             raise OAuth2Error("invalid_grant", "refresh_token 已被使用")
-        await self._storage.delete(self._key("access", info.access_token))
-        return await self._issue_tokens(
-            client_id=client_id, login_id=info.login_id, scopes=info.scopes
-        )
+        try:
+            response = await self._issue_tokens(
+                client_id=client_id, login_id=info.login_id, scopes=info.scopes
+            )
+        except Exception:
+            await self._storage.set(key, raw, self.refresh_token_timeout)
+            raise
+        try:
+            await self._storage.delete(self._key("access", info.access_token))
+        except Exception:
+            logger.exception("旧 access_token 清理失败：client_id=%s", client_id)
+        return response
 
     async def client_credentials_token(
         self,
@@ -263,6 +297,7 @@ class OAuth2Server:
             login_id=login_id,
             scopes=scopes,
             expires_in=self.access_token_timeout,
+            refresh_token=refresh_token,
         )
         await self._storage.set(
             self._key("access", access_token), info.to_json(), self.access_token_timeout
@@ -293,13 +328,22 @@ class OAuth2Server:
         return info
 
     async def revoke_token(self, token: str) -> bool:
-        """吊销 access_token 或 refresh_token，两者都尝试。"""
+        """吊销 access_token 或 refresh_token，并一并作废配对的另一张凭证。"""
         revoked = False
         for suffix in ("access", "refresh"):
             key = self._key(suffix, token)
-            if await self._storage.exists(key):
-                await self._storage.delete(key)
-                revoked = True
+            raw = await self._storage.get(key)
+            if raw is None:
+                continue
+            info = AccessTokenInfo.from_json(raw)
+            await self._storage.delete(key)
+            revoked = True
+            if info is None:
+                continue
+            if suffix == "access" and info.refresh_token:
+                await self._storage.delete(self._key("refresh", info.refresh_token))
+            elif suffix == "refresh" and info.access_token:
+                await self._storage.delete(self._key("access", info.access_token))
         return revoked
 
     def build_authorize_url(
@@ -342,15 +386,22 @@ class OAuth2Server:
         ):
             raise OAuth2Error("invalid_client", "client_secret 不正确")
 
-    @staticmethod
-    def _verify_pkce(code: AuthorizationCode, code_verifier: str | None) -> None:
+    def _check_pkce_method(self, method: str) -> None:
+        if method == "S256":
+            return
+        if method == "plain" and self.allow_plain_pkce:
+            return
+        if method == "plain":
+            raise OAuth2Error("invalid_request", "不支持 plain 方式的 PKCE")
+        raise OAuth2Error("invalid_request", "未知的 code_challenge_method")
+
+    def _verify_pkce(self, code: AuthorizationCode, code_verifier: str | None) -> None:
         if not code.code_challenge:
             return
         if not code_verifier:
             raise OAuth2Error("invalid_grant", "缺少 code_verifier")
-        expected = (
-            code_verifier if code.code_challenge_method == "plain" else _s256(code_verifier)
-        )
+        self._check_pkce_method(code.code_challenge_method)
+        expected = code_verifier if code.code_challenge_method == "plain" else _s256(code_verifier)
         if not secrets.compare_digest(expected, code.code_challenge):
             raise OAuth2Error("invalid_grant", "code_verifier 校验失败")
 

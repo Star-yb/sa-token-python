@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -18,6 +19,21 @@ async def test_server_issued_nonce_is_bound_and_single_use(manager) -> None:
 
     with pytest.raises(SecurityException) as error:
         await manager.nonces.consume(nonce, "10001", purpose="login")
+    assert error.value.code == "INVALID_NONCE"
+
+
+async def test_nonce_strips_subject_and_rejects_revoked_state(manager) -> None:
+    nonce = await manager.nonces.issue(" 10001 ", purpose="pay")
+    await manager.nonces.consume(nonce, "10001", purpose="pay")
+
+    issued = await manager.nonces.issue("10001")
+    key = manager.nonces._key(issued)
+    raw = await manager.storage.get(key)
+    payload = json.loads(raw or "")
+    payload["state"] = "revoked"
+    await manager.storage.set(key, json.dumps(payload), 60)
+    with pytest.raises(SecurityException) as error:
+        await manager.nonces.consume(issued, "10001")
     assert error.value.code == "INVALID_NONCE"
 
 
@@ -66,6 +82,30 @@ async def test_temp_token_value_index(manager) -> None:
     )
 
 
+async def test_kickout_without_session_still_revokes_refresh(stp, manager) -> None:
+    pair = await stp.login_with_refresh("10001", device="web")
+    await stp.logout("10001", device="web")
+    await stp.kickout("10001")
+    with pytest.raises(SecurityException):
+        await manager.refresh_tokens.refresh(pair.refresh_token)
+
+
+async def test_temp_token_rejects_none_and_keeps_corrupt_record(manager) -> None:
+    with pytest.raises(SecurityException) as error:
+        await manager.temp_tokens.create(None, 60)
+    assert error.value.code == "TEMP_TOKEN_VALUE_NONE"
+
+    token = "corrupt-token"
+    key = f"{manager.config.storage_key_prefix}security:temp:default:{token}"
+    await manager.storage.set(key, "not-json", 60)
+    assert await manager.temp_tokens.consume(token) is None
+    assert await manager.storage.get(key) == "not-json"
+
+    with pytest.raises(SecurityException) as namespace_error:
+        await manager.temp_tokens.parse("b:c", namespace="a")
+    assert namespace_error.value.code == "INVALID_TEMP_TOKEN"
+
+
 async def test_login_accepts_explicit_token(stp) -> None:
     token = await stp.login("10001", token_value="legacy-token")
     assert token == "legacy-token"
@@ -107,11 +147,92 @@ async def test_login_refresh_rotation_and_replay_detection(stp, manager) -> None
     assert not await stp.is_login(rotated.access_token)
 
 
+async def test_refresh_family_drops_logged_out_access(stp, manager) -> None:
+    pair = await stp.login_with_refresh("10001")
+    rotated = await manager.refresh_tokens.refresh(pair.refresh_token)
+    raw = await manager.storage.get(manager.refresh_tokens._refresh_key(rotated.refresh_token))
+    family_id = json.loads(raw or "")["family_id"]
+    family = json.loads(
+        await manager.storage.get(manager.refresh_tokens._family_key(family_id)) or ""
+    )
+    assert pair.access_token not in family["access_tokens"]
+    assert rotated.access_token in family["access_tokens"]
+
+
+async def test_logout_without_session_still_revokes_refresh(stp, manager) -> None:
+    pair = await stp.login_with_refresh("10001", device="web")
+    await stp.logout("10001", device="web")
+    await stp.logout("10001")
+    with pytest.raises(SecurityException) as error:
+        await manager.refresh_tokens.refresh(pair.refresh_token)
+    assert error.value.code == "INVALID_REFRESH_TOKEN"
+
+
+async def test_issue_drops_refresh_when_family_update_fails(stp, manager, monkeypatch) -> None:
+    async def fail_update(*args, **kwargs):
+        raise SecurityException("REFRESH_CONFLICT", "conflict")
+
+    monkeypatch.setattr(manager.refresh_tokens, "_update_family", fail_update)
+    with pytest.raises(SecurityException) as error:
+        await stp.login_with_refresh("10001")
+    assert error.value.code == "REFRESH_CONFLICT"
+    assert await stp.get_session("10001", create=False) is None
+
+
+async def test_refresh_does_not_revive_deleted_record(stp, manager, monkeypatch) -> None:
+    manager.config.refresh_token_rotate = False
+    pair = await stp.login_with_refresh("10001")
+    logic = manager.stp()
+    original_login = logic.login
+    refresh_key = manager.config.make_key("security", "refresh", pair.refresh_token)
+
+    async def login_then_delete(*args, **kwargs):
+        token = await original_login(*args, **kwargs)
+        await manager.storage.delete(refresh_key)
+        return token
+
+    monkeypatch.setattr(logic, "login", login_then_delete)
+    with pytest.raises(SecurityException):
+        await manager.refresh_tokens.refresh(pair.refresh_token)
+    assert await manager.storage.get(refresh_key) is None
+
+
 async def test_kickout_revokes_refresh_family(stp, manager) -> None:
     pair = await stp.login_with_refresh("10001")
     await stp.kickout("10001")
     with pytest.raises(SecurityException):
         await manager.refresh_tokens.refresh(pair.refresh_token)
+
+
+async def test_refresh_rejects_missing_family(stp, manager) -> None:
+    pair = await stp.login_with_refresh("10001")
+    raw = await manager.storage.get(
+        manager.config.make_key("security", "refresh", pair.refresh_token)
+    )
+    family_id = json.loads(raw)["family_id"]
+    await manager.storage.delete(
+        manager.config.make_key("security", "refresh-family", family_id)
+    )
+    with pytest.raises(SecurityException) as error:
+        await manager.refresh_tokens.refresh(pair.refresh_token)
+    assert error.value.code == "REFRESH_FAMILY_REVOKED"
+    assert await stp.is_login(pair.access_token)
+
+
+async def test_refresh_restores_token_when_login_fails(stp, manager, monkeypatch) -> None:
+    pair = await stp.login_with_refresh("10001")
+    logic = manager.stp()
+
+    async def fail_login(*args, **kwargs):
+        raise RuntimeError("login failed")
+
+    monkeypatch.setattr(logic, "login", fail_login)
+    with pytest.raises(RuntimeError, match="login failed"):
+        await manager.refresh_tokens.refresh(pair.refresh_token)
+
+    monkeypatch.undo()
+    rotated = await manager.refresh_tokens.refresh(pair.refresh_token)
+    assert await stp.is_login(rotated.access_token)
 
 
 async def test_kickout_after_refresh_login_keeps_kick_out_reason(stp, manager) -> None:

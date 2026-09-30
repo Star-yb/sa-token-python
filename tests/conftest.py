@@ -7,21 +7,23 @@ from sa_token.storage import MemoryStorage
 from sa_token.stp_util import clear_manager
 
 
+@pytest.fixture(autouse=True)
+def _reset_global_manager():
+    yield
+    clear_manager()
+
+
 @pytest.fixture
 def build_manager():
     """返回一个构建 Manager 的工厂，测试之间互不干扰。"""
-    created: list[SaTokenManager] = []
 
     def _build(**options) -> SaTokenManager:
         builder = SaToken.builder().storage(MemoryStorage()).print_banner(False)
         if options:
             builder = builder.set_option(**options)
-        manager = builder.build()
-        created.append(manager)
-        return manager
+        return builder.build()
 
     yield _build
-    clear_manager()
 
 
 @pytest.fixture

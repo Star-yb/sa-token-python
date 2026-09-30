@@ -12,6 +12,15 @@ from sa_token.storage import MemoryStorage
 from sa_token.strategy import BUILTIN_STYLES, create_strategy
 
 
+async def test_zero_ttl_expires_immediately_and_bad_cursor_is_safe() -> None:
+    storage = MemoryStorage()
+    await storage.set("gone", "1", 0)
+    assert await storage.get("gone") is None
+    cursor, keys = await storage.scan("*", cursor="not-a-number")
+    assert cursor is None or cursor.isdigit()
+    assert isinstance(keys, list)
+
+
 async def test_memory_storage_basic_roundtrip() -> None:
     storage = MemoryStorage()
     await storage.set("a", "1")
@@ -71,9 +80,31 @@ def test_token_styles_generate_unique_values(style: str) -> None:
     assert all(token for token in tokens)
 
 
+def test_random_style_requires_a_numeric_suffix() -> None:
+    with pytest.raises(ValueError, match="random32"):
+        create_strategy(SaTokenConfig(token_style="random"))
+    with pytest.raises(ValueError, match="xyz"):
+        create_strategy(SaTokenConfig(token_style="randomxyz"))
+
+
+async def test_get_triggers_expired_key_cleanup() -> None:
+    storage = MemoryStorage(cleanup_interval=0)
+    await storage.set("stale", "1", 1)
+    await asyncio.sleep(1.1)
+    await storage.get("other")
+    assert "stale" not in storage._data
+
+
 def test_unknown_token_style_is_rejected() -> None:
     with pytest.raises(ValueError):
         create_strategy(SaTokenConfig(token_style="nope"))
+
+
+def test_tik_strategy_rejects_empty_length() -> None:
+    from sa_token.strategy.builtin import TikStrategy
+
+    with pytest.raises(ValueError, match="至少为 1"):
+        TikStrategy(0)
 
 
 def test_config_normalizes_key_prefix() -> None:
@@ -82,9 +113,21 @@ def test_config_normalizes_key_prefix() -> None:
     assert config.make_key("login", "token", "abc") == "myapp:login:token:abc"
 
 
+def test_config_rejects_illegal_literal_and_timeout() -> None:
+    with pytest.raises(ValueError, match="overflow_logout_mode"):
+        SaTokenConfig(overflow_logout_mode="logut")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="replaced_range"):
+        SaTokenConfig(replaced_range="curr")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="timeout"):
+        SaTokenConfig(timeout=-2)
+    assert SaTokenConfig(timeout=-1, perm_cache_timeout=0).perm_cache_timeout == 0
+
+
 def test_config_from_dict_ignores_unknown_keys() -> None:
     config = SaTokenConfig.from_dict({"timeout": 60, "nope": 1})
     assert config.timeout == 60
+    with pytest.raises(ValueError, match="未知配置项"):
+        SaTokenConfig.from_dict({"timeout": 60, "nope": 1}, strict=True)
 
 
 async def test_events_are_emitted(build_manager) -> None:
@@ -105,6 +148,50 @@ async def test_events_are_emitted(build_manager) -> None:
     assert login_event.token_fingerprint != token
 
 
+async def test_wildcard_listener_runs_once_for_all_event() -> None:
+    from sa_token.listener import EventBus
+
+    bus = EventBus()
+    seen: list[Event] = []
+    bus.on(Event.ALL, lambda data: seen.append(data.event))
+    await bus.emit(EventData(event=Event.ALL))
+    assert seen == [Event.ALL]
+
+
+async def test_awaitable_listener_is_awaited() -> None:
+    from sa_token.listener import EventBus
+
+    class Mark:
+        def __init__(self) -> None:
+            self.awaited = False
+
+        def __await__(self):
+            async def finish() -> None:
+                self.awaited = True
+
+            return finish().__await__()
+
+    bus = EventBus()
+    mark = Mark()
+    bus.on(Event.LOGIN, lambda data: mark)
+    await bus.emit(EventData(event=Event.LOGIN))
+    assert mark.awaited is True
+
+
+def test_build_isolates_config_and_listeners() -> None:
+    from sa_token import SaToken
+
+    seen: list[Event] = []
+    builder = SaToken.builder().storage(MemoryStorage()).print_banner(False).as_global(False)
+    first = builder.build()
+    builder.timeout(10)
+    builder.on(Event.LOGIN, lambda data: seen.append(data.event))
+    second = builder.build()
+    assert first.config.timeout != 10
+    assert second.config.timeout == 10
+    assert first.events is not second.events
+
+
 async def test_listener_failure_does_not_break_login(build_manager) -> None:
     manager = build_manager()
 
@@ -113,6 +200,16 @@ async def test_listener_failure_does_not_break_login(build_manager) -> None:
 
     manager.on(Event.LOGIN, broken_listener)
     assert await manager.stp().login(10001)
+
+
+async def test_dynamic_active_timeout_is_per_token(build_manager) -> None:
+    manager = build_manager(active_timeout=-1, dynamic_active_timeout=True, auto_renew=False)
+    stp = manager.stp()
+    token = await stp.login(10001, active_timeout=1)
+    await asyncio.sleep(1.1)
+    with pytest.raises(NotLoginException) as excinfo:
+        await stp.check_login(token)
+    assert excinfo.value.type is NotLoginType.TOKEN_FREEZE
 
 
 async def test_active_timeout_freezes_token(build_manager) -> None:

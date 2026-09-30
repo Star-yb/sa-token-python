@@ -44,20 +44,40 @@ def test_oauth2_fastapi_client_credentials(manager) -> None:
         payload = token_response.json()
         assert "refresh_token" not in payload
 
-        introspection = client.post(
+        unauthenticated = client.post(
             "/oauth2/introspect", data={"token": payload["access_token"]}
+        )
+        assert unauthenticated.status_code == 401
+
+        introspection = client.post(
+            "/oauth2/introspect",
+            data={
+                "token": payload["access_token"],
+                "client_id": "backend",
+                "client_secret": "secret",
+            },
         )
         assert introspection.json()["active"] is True
 
         assert (
             client.post(
-                "/oauth2/revoke", data={"token": payload["access_token"]}
+                "/oauth2/revoke",
+                data={
+                    "token": payload["access_token"],
+                    "client_id": "backend",
+                    "client_secret": "secret",
+                },
             ).status_code
             == 200
         )
         assert (
             client.post(
-                "/oauth2/introspect", data={"token": payload["access_token"]}
+                "/oauth2/introspect",
+                data={
+                    "token": payload["access_token"],
+                    "client_id": "backend",
+                    "client_secret": "secret",
+                },
             ).json()
             == {"active": False}
         )
@@ -74,7 +94,16 @@ def test_oauth2_fastapi_standard_error(manager) -> None:
             json={"grant_type": "unknown"},
         )
         assert response.status_code == 400
+        assert response.headers["cache-control"] == "no-store"
         assert response.json() == {
             "error": "unsupported_grant_type",
             "error_description": "不支持的 grant_type: unknown",
         }
+
+        invalid = client.post(
+            "/oauth2/token",
+            content=b"{",
+            headers={"content-type": "application/json"},
+        )
+        assert invalid.status_code == 400
+        assert invalid.json()["error"] == "invalid_request"

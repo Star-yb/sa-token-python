@@ -46,7 +46,19 @@ class OAuth2Client:
         if not isinstance(payload, dict) or "client_id" not in payload:
             return None
         allowed = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in payload.items() if k in allowed})
+        data = {key: value for key, value in payload.items() if key in allowed}
+        if not isinstance(data.get("client_id"), str):
+            return None
+        for name in ("redirect_uris", "grant_types", "scopes"):
+            value = data.get(name)
+            if value is not None and not (
+                isinstance(value, list) and all(isinstance(item, str) for item in value)
+            ):
+                return None
+        try:
+            return cls(**data)
+        except TypeError:
+            return None
 
 
 @dataclass
@@ -73,7 +85,10 @@ class AuthorizationCode:
         if not isinstance(payload, dict) or "code" not in payload:
             return None
         allowed = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in payload.items() if k in allowed})
+        try:
+            return cls(**{key: value for key, value in payload.items() if key in allowed})
+        except TypeError:
+            return None
 
 
 @dataclass
@@ -84,6 +99,7 @@ class AccessTokenInfo:
     scopes: list[str] = field(default_factory=list)
     create_time: int = field(default_factory=now_ms)
     expires_in: int = 7200
+    refresh_token: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"))
@@ -97,7 +113,10 @@ class AccessTokenInfo:
         if not isinstance(payload, dict) or "access_token" not in payload:
             return None
         allowed = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in payload.items() if k in allowed})
+        try:
+            return cls(**{key: value for key, value in payload.items() if key in allowed})
+        except TypeError:
+            return None
 
 
 @dataclass

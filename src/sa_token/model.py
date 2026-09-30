@@ -58,7 +58,7 @@ class TokenInfo:
 
     @property
     def is_offline(self) -> bool:
-        return self.state in _OFFLINE_STATES
+        return isinstance(self.state, str) and self.state in _OFFLINE_STATES
 
     @property
     def offline_type(self) -> NotLoginType | None:
@@ -77,8 +77,14 @@ class TokenInfo:
             return None
         if not isinstance(payload, dict) or "login_id" not in payload:
             return None
+        state = payload.get("state")
+        if state is not None and not isinstance(state, str):
+            payload["state"] = None
         allowed = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in payload.items() if k in allowed})
+        try:
+            return cls(**{k: v for k, v in payload.items() if k in allowed})
+        except TypeError:
+            return None
 
 
 @dataclass
@@ -131,15 +137,31 @@ class SessionData:
             return None
         if not isinstance(payload, dict) or "id" not in payload:
             return None
-        terminals = [
-            TerminalInfo.from_dict(item)
-            for item in payload.get("terminal_list", [])
-            if isinstance(item, dict)
-        ]
+        raw_terminals = payload.get("terminal_list")
+        if raw_terminals is None:
+            raw_terminals = []
+        if not isinstance(raw_terminals, list):
+            return None
+        terminals: list[TerminalInfo] = []
+        for item in raw_terminals:
+            if not isinstance(item, dict) or "token" not in item:
+                continue
+            terminals.append(TerminalInfo.from_dict(item))
+        data = payload.get("data")
+        create_time = payload.get("create_time", now_ms())
+        history_count = payload.get("history_terminal_count", len(terminals))
         return cls(
-            id=payload["id"],
-            create_time=payload.get("create_time", now_ms()),
-            data=payload.get("data", {}),
+            id=str(payload["id"]),
+            create_time=(
+                create_time
+                if isinstance(create_time, int) and not isinstance(create_time, bool)
+                else now_ms()
+            ),
+            data=data if isinstance(data, dict) else {},
             terminal_list=terminals,
-            history_terminal_count=payload.get("history_terminal_count", len(terminals)),
+            history_terminal_count=(
+                history_count
+                if isinstance(history_count, int) and not isinstance(history_count, bool)
+                else len(terminals)
+            ),
         )

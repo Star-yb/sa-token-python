@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sa-token-python-core"
-version = "0.1.5"
-description = "有状态 Token 认证与权限鉴权框架（轻量核心）。灵感来源于 Java 的 Sa-Token。常用依赖请安装 sa-token-python；Web 框架按 extras 安装。"
+name = "sa-token-python"
+version = "0.1.6"
+description = "有状态 Token 认证与权限鉴权框架。灵感来源于 Java 的 Sa-Token。框架适配随包提供；Redis / JWT 按 extras 安装，Web 框架请自行安装。"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -27,18 +27,6 @@ dependencies = []
 [project.optional-dependencies]
 redis = ["redis>=5"]
 jwt = ["pyjwt>=2"]
-fastapi = ["fastapi>=0.110"]
-starlette = ["starlette>=0.37"]
-flask = ["flask>=3"]
-django = ["django>=4.2"]
-full = [
-    "redis>=5",
-    "pyjwt>=2",
-    "fastapi>=0.110",
-    "starlette>=0.37",
-    "flask>=3",
-    "django>=4.2",
-]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
@@ -59,7 +47,7 @@ packages = ["src/sa_token"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [
-    "/packages",
+    "/scripts",
 ]
 
 [tool.pytest.ini_options]

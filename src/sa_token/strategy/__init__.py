@@ -16,6 +16,7 @@ from .builtin import (
     TimestampStrategy,
     UuidStrategy,
 )
+from .jwt import JwtStrategy
 
 __all__ = [
     "TokenStrategy",
@@ -52,7 +53,11 @@ def create_strategy(config: SaTokenConfig) -> TokenStrategy:
         return SimpleUuidStrategy()
     if style.startswith("random"):
         suffix = style[len("random") :]
-        return RandomStrategy(int(suffix) if suffix.isdigit() else 32)
+        if not suffix.isdigit():
+            raise ValueError(
+                f"random 风格后必须跟数字（如 random32、random64），收到: {suffix!r}"
+            )
+        return RandomStrategy(int(suffix))
     if style == "hash":
         return HashStrategy()
     if style == "timestamp":
@@ -60,18 +65,10 @@ def create_strategy(config: SaTokenConfig) -> TokenStrategy:
     if style == "tik":
         return TikStrategy()
     if style == "jwt":
-        from .jwt import JwtStrategy
-
+        if not config.jwt_secret_key:
+            raise ValueError("使用 JWT 风格时必须配置 jwt_secret_key")
         return JwtStrategy(
-            config.jwt_secret_key or "",
+            config.jwt_secret_key,
             algorithm=config.jwt_algorithm,
         )
     raise ValueError(f"未知的 token_style: {config.token_style}，可选：{', '.join(BUILTIN_STYLES)}")
-
-
-def __getattr__(name: str):
-    if name == "JwtStrategy":
-        from .jwt import JwtStrategy
-
-        return JwtStrategy
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

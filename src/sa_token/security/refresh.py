@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 import secrets
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
 from ..exception import SecurityException
@@ -47,7 +49,10 @@ class _RefreshRecord:
     def from_json(cls, raw: str) -> _RefreshRecord | None:
         try:
             payload = json.loads(raw)
-            return cls(**payload) if isinstance(payload, dict) else None
+            if not isinstance(payload, dict):
+                return None
+            known = {item.name for item in fields(cls)}
+            return cls(**{key: value for key, value in payload.items() if key in known})
         except (TypeError, ValueError):
             return None
 
@@ -67,7 +72,10 @@ class _FamilyRecord:
     def from_json(cls, raw: str) -> _FamilyRecord | None:
         try:
             payload = json.loads(raw)
-            return cls(**payload) if isinstance(payload, dict) else None
+            if not isinstance(payload, dict):
+                return None
+            known = {item.name for item in fields(cls)}
+            return cls(**{key: value for key, value in payload.items() if key in known})
         except (TypeError, ValueError):
             return None
 
@@ -91,6 +99,16 @@ class RefreshTokenManager:
 
     def _family_key(self, family_id: str) -> str:
         return self._manager.config.make_key("security", "refresh-family", family_id)
+
+    def _access_index_key(self, access_token: str) -> str:
+        return self._manager.config.make_key("security", "refresh-access", access_token)
+
+    async def _bind_access_index(self, access_token: str, refresh_token: str) -> None:
+        await self._storage.set(
+            self._access_index_key(access_token),
+            refresh_token,
+            self._manager.config.refresh_token_timeout,
+        )
 
     def _user_index_key(self, login_type: str, login_id: str) -> str:
         return self._manager.config.make_key(
@@ -128,8 +146,16 @@ class RefreshTokenManager:
         else:
             raise SecurityException("REFRESH_ALLOCATION_FAILED", "无法分配 refresh token")
 
-        await self._update_family(resolved_family, record)
-        await self._add_user_family(login_type, login_id, resolved_family)
+        try:
+            await self._update_family(resolved_family, record)
+            await self._add_user_family(login_type, login_id, resolved_family)
+        except Exception:
+            await self._storage.delete(self._refresh_key(refresh_token))
+            await self._manager.stp(login_type).logout_by_token(
+                access_token, revoke_refresh=False
+            )
+            raise
+        await self._bind_access_index(access_token, refresh_token)
         access_timeout = self._manager.config.timeout
         return LoginTokenPair(
             access_token=access_token,
@@ -144,6 +170,14 @@ class RefreshTokenManager:
         record = _RefreshRecord.from_json(raw) if raw else None
         if record is None:
             raise SecurityException("INVALID_REFRESH_TOKEN", "refresh token 无效或已过期")
+        family_raw = await self._storage.get(self._family_key(record.family_id))
+        family = _FamilyRecord.from_json(family_raw) if family_raw else None
+        if family is None or family.revoked:
+            raise SecurityException(
+                "REFRESH_FAMILY_REVOKED",
+                "token family 已被吊销",
+                login_type=record.login_type,
+            )
         if record.state != "active":
             if self._manager.config.refresh_token_reuse_detection:
                 await self.revoke_family(record.family_id)
@@ -166,42 +200,61 @@ class RefreshTokenManager:
 
         logic = self._manager.stp(record.login_type)
         await logic.logout_by_token(record.access_token, revoke_refresh=False)
-        new_access = await logic.login(
-            record.login_id,
-            device=record.device,
-            timeout=self._manager.config.timeout,
-        )
-
-        if not self._manager.config.refresh_token_rotate:
-            active_record = _RefreshRecord(
-                **{
-                    **asdict(record),
-                    "access_token": new_access,
-                    "created_at": now_ms(),
-                    "state": "active",
-                }
+        new_access: str | None = None
+        try:
+            new_access = await logic.login(
+                record.login_id,
+                device=record.device,
+                timeout=self._manager.config.timeout,
             )
-            await self._storage.set(
+            if not self._manager.config.refresh_token_rotate:
+                active_record = _RefreshRecord(
+                    **{
+                        **asdict(record),
+                        "access_token": new_access,
+                        "created_at": now_ms(),
+                        "state": "active",
+                    }
+                )
+                reactivated = await self._storage.compare_and_set(
+                    key,
+                    used_record.to_json(),
+                    active_record.to_json(),
+                    self._manager.config.refresh_token_timeout,
+                )
+                if not reactivated:
+                    raise SecurityException(
+                        "REFRESH_CONFLICT",
+                        "refresh token 在轮换期间已被吊销",
+                        login_type=record.login_type,
+                    )
+                await self._update_family(record.family_id, active_record)
+                await self._storage.delete(self._access_index_key(record.access_token))
+                await self._bind_access_index(new_access, refresh_token)
+                return LoginTokenPair(
+                    access_token=new_access,
+                    refresh_token=refresh_token,
+                    expires_in=self._manager.config.timeout,
+                    refresh_expires_in=self._manager.config.refresh_token_timeout,
+                )
+            return await self.issue(
+                new_access,
+                record.login_id,
+                login_type=record.login_type,
+                device=record.device,
+                family_id=record.family_id,
+                generation=record.generation + 1,
+            )
+        except Exception:
+            if new_access is not None:
+                await logic.logout_by_token(new_access, revoke_refresh=False)
+            await self._storage.compare_and_set(
                 key,
-                active_record.to_json(),
+                used_record.to_json(),
+                record.to_json(),
                 self._manager.config.refresh_token_timeout,
             )
-            await self._update_family(record.family_id, active_record)
-            return LoginTokenPair(
-                access_token=new_access,
-                refresh_token=refresh_token,
-                expires_in=self._manager.config.timeout,
-                refresh_expires_in=self._manager.config.refresh_token_timeout,
-            )
-
-        return await self.issue(
-            new_access,
-            record.login_id,
-            login_type=record.login_type,
-            device=record.device,
-            family_id=record.family_id,
-            generation=record.generation + 1,
-        )
+            raise
 
     async def revoke(self, refresh_token: str) -> bool:
         key = self._refresh_key(refresh_token)
@@ -210,23 +263,23 @@ class RefreshTokenManager:
         if record is None:
             return False
         await self._storage.delete(key)
+        await self._storage.delete(self._access_index_key(record.access_token))
+        await self._drop_family_member(record.family_id, refresh_token, record.access_token)
         await self._manager.stp(record.login_type).logout_by_token(
             record.access_token, revoke_refresh=False
         )
         return True
 
     async def revoke_for_access(self, access_token: str) -> None:
-        prefix = self._manager.config.key_prefix("security")
-        cursor: str | None = None
-        while True:
-            cursor, keys = await self._storage.scan(f"{prefix}refresh:*", cursor, 200)
-            for key in keys:
-                raw = await self._storage.get(key)
-                record = _RefreshRecord.from_json(raw) if raw else None
-                if record is not None and record.access_token == access_token:
-                    await self._storage.delete(key)
-            if cursor is None:
-                return
+        index_key = self._access_index_key(access_token)
+        refresh_token = await self._storage.get(index_key)
+        if refresh_token:
+            key = self._refresh_key(refresh_token)
+            raw = await self._storage.get(key)
+            record = _RefreshRecord.from_json(raw) if raw else None
+            if record is not None and record.access_token == access_token:
+                await self._storage.delete(key)
+        await self._storage.delete(index_key)
 
     async def revoke_all_for_login(
         self,
@@ -250,12 +303,23 @@ class RefreshTokenManager:
         的离线记录删掉，客户端就会看到 ``INVALID_TOKEN`` 而不是 ``KICK_OUT``。
         """
         key = self._family_key(family_id)
-        raw = await self._storage.get(key)
-        family = _FamilyRecord.from_json(raw) if raw else None
-        if family is None:
-            return
-        family.revoked = True
-        await self._storage.set(key, family.to_json(), self._manager.config.refresh_token_timeout)
+        family: _FamilyRecord | None = None
+        for _ in range(12):
+            raw = await self._storage.get(key)
+            family = _FamilyRecord.from_json(raw) if raw else None
+            if family is None or raw is None:
+                return
+            family.revoked = True
+            if await self._storage.compare_and_set(
+                key,
+                raw,
+                family.to_json(),
+                self._manager.config.refresh_token_timeout,
+            ):
+                break
+        else:
+            raise SecurityException("REFRESH_CONFLICT", "吊销 token family 时发生并发冲突")
+        assert family is not None
         logic = self._manager.stp(family.login_type)
         if logout_access:
             for access_token in set(family.access_tokens):
@@ -265,10 +329,70 @@ class RefreshTokenManager:
                 await logic.logout_by_token(access_token, revoke_refresh=False)
         for token in set(family.refresh_tokens):
             await self._storage.delete(self._refresh_key(token))
+        for access_token in set(family.access_tokens):
+            await self._storage.delete(self._access_index_key(access_token))
+        await self._remove_user_family(family.login_type, family.login_id, family_id)
+
+    async def _drop_family_member(
+        self, family_id: str, refresh_token: str, access_token: str
+    ) -> None:
+        """从 family 列表去掉已经单独吊销的令牌，避免列表只增不减。"""
+        key = self._family_key(family_id)
+        for _ in range(12):
+            raw = await self._storage.get(key)
+            family = _FamilyRecord.from_json(raw) if raw else None
+            if family is None or raw is None:
+                return
+            family.refresh_tokens = [
+                item for item in family.refresh_tokens if item != refresh_token
+            ]
+            family.access_tokens = [item for item in family.access_tokens if item != access_token]
+            if await self._storage.compare_and_set(
+                key,
+                raw,
+                family.to_json(),
+                self._manager.config.refresh_token_timeout,
+            ):
+                return
+
+    async def _remove_user_family(self, login_type: str, login_id: str, family_id: str) -> None:
+        key = self._user_index_key(login_type, login_id)
+        for _ in range(12):
+            raw = await self._storage.get(key)
+            if not raw:
+                return
+            families = json.loads(raw)
+            if not isinstance(families, list) or family_id not in families:
+                return
+            remaining = [item for item in families if item != family_id]
+            if await self._storage.compare_and_set(
+                key,
+                raw,
+                json.dumps(remaining, separators=(",", ":")),
+                self._manager.config.refresh_token_timeout,
+            ):
+                return
+
+    async def _prune_family(self, family: _FamilyRecord) -> None:
+        """丢掉已经不在存储里的成员，避免 family 列表只增不减。"""
+        logic = self._manager.stp(family.login_type)
+        alive_access: list[str] = []
+        for access_token in family.access_tokens:
+            if await logic.get_token_info(access_token) is not None:
+                alive_access.append(access_token)
+        family.access_tokens = alive_access
+        alive_refresh: list[str] = []
+        for refresh_token in family.refresh_tokens:
+            if await self._storage.exists(self._refresh_key(refresh_token)):
+                alive_refresh.append(refresh_token)
+        family.refresh_tokens = alive_refresh
+
+    async def _backoff(self, attempt: int) -> None:
+        await asyncio.sleep(random.uniform(0.001, 0.005) * (attempt + 1))
 
     async def _update_family(self, family_id: str, record: _RefreshRecord) -> None:
         key = self._family_key(family_id)
-        for _ in range(12):
+        for attempt in range(12):
             raw = await self._storage.get(key)
             if raw is None:
                 family = _FamilyRecord(record.login_id, record.login_type)
@@ -278,10 +402,12 @@ class RefreshTokenManager:
                     key, family.to_json(), self._manager.config.refresh_token_timeout
                 ):
                     return
+                await self._backoff(attempt)
                 continue
             family = _FamilyRecord.from_json(raw)
             if family is None or family.revoked:
                 raise SecurityException("REFRESH_FAMILY_REVOKED", "token family 已被吊销")
+            await self._prune_family(family)
             if record.access_token not in family.access_tokens:
                 family.access_tokens.append(record.access_token)
             if record.refresh_token not in family.refresh_tokens:
@@ -293,11 +419,12 @@ class RefreshTokenManager:
                 self._manager.config.refresh_token_timeout,
             ):
                 return
+            await self._backoff(attempt)
         raise SecurityException("REFRESH_CONFLICT", "更新 token family 时发生并发冲突")
 
     async def _add_user_family(self, login_type: str, login_id: str, family_id: str) -> None:
         key = self._user_index_key(login_type, login_id)
-        for _ in range(12):
+        for attempt in range(12):
             raw = await self._storage.get(key)
             families = json.loads(raw) if raw else []
             if family_id in families:
@@ -313,4 +440,5 @@ class RefreshTokenManager:
                 key, raw, new_raw, self._manager.config.refresh_token_timeout
             ):
                 return
+            await self._backoff(attempt)
         raise SecurityException("REFRESH_CONFLICT", "更新用户 refresh 索引时发生并发冲突")

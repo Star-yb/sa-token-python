@@ -38,31 +38,22 @@ token = await StpUtil.login(user_id)
 
 ## 安装
 
-Python 3.10+。两个发行名，导入均为 `sa_token`。
+Python 3.10+。导入名为 `sa_token`。
 
 ```bash
-pip install sa-token-python                     # 核心 + Redis / JWT（不含 Web 框架）
-pip install "sa-token-python[fastapi]"          # 再加上 FastAPI / Starlette
-pip install "sa-token-python[flask]"            # 再加上 Flask
-pip install "sa-token-python[django]"           # 再加上 Django
-pip install "sa-token-python[full]"             # Redis / JWT / 全部框架适配
-
-pip install sa-token-python-core                # 轻量：核心 + 内存存储
-pip install "sa-token-python-core[redis]"       # Redis 存储
-pip install "sa-token-python-core[jwt]"         # JWT token 风格
-pip install "sa-token-python-core[fastapi]"     # FastAPI / Starlette
-pip install "sa-token-python-core[flask]"       # Flask
-pip install "sa-token-python-core[django]"      # Django
-pip install "sa-token-python-core[full]"        # 与 pip install "sa-token-python[full]" 相同
+pip install sa-token-python                     # 核心 + FastAPI / Flask / Django 适配代码
+pip install "sa-token-python[redis]"            # Redis 存储
+pip install "sa-token-python[jwt]"              # JWT token 风格
 ```
 
-也可按需组合 extras，例如 `"sa-token-python-core[redis,jwt,fastapi]"`。
+默认安装已经带上三个框架的适配代码。FastAPI、Flask、Django、Starlette 请自行安装，例如 `pip install fastapi`。本包不会代为下载这些框架。导入对应模块时如果本机没有该框架，会抛出 `ImportError` 并提示安装命令。
+
+Redis 与 PyJWT 仍通过 extras 安装，也可组合为 `"sa-token-python[redis,jwt]"`。
 
 从源码安装：
 
 ```bash
 pip install "git+https://github.com/Star-yb/sa-token-python.git"
-pip install "sa-token-python-core[fastapi] @ git+https://github.com/Star-yb/sa-token-python.git"
 ```
 
 ---
@@ -437,7 +428,7 @@ def delete_order(order_id):
 
 Django 自带 `django.contrib.auth`（Session + User 模型）。本库**不是**去替换它，而是给 **纯 API / DRF** 项目提供与 FastAPI、Flask 一致的 Token 鉴权。模板站点继续用 Django Auth 即可。
 
-安装：`pip install "sa-token-python[django]"` 或 `pip install "sa-token-python-core[django]"`。Django 是同步 WSGI，一律走 `StpUtilSync`。
+使用 Django 适配前请自行安装 Django：`pip install django`。Django 是同步 WSGI，一律走 `StpUtilSync`。
 
 ### 1. 启动时初始化
 

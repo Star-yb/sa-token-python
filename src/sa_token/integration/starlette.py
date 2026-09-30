@@ -20,13 +20,14 @@ try:
     from starlette.responses import JSONResponse, Response
 except ImportError as exc:  # pragma: no cover - 依赖缺失路径
     raise ImportError(
-        '该模块需要 starlette，请执行：pip install "sa-token-python-core[fastapi]"'
+        "该模块需要 starlette，请执行：pip install starlette"
     ) from exc
 
 from ..adapter.http import HttpContext
 from ..adapter.path import PathAuthConfig
 from ..adapter.pipeline import build_rule, resolve_token, run_auth_flow, run_path_auth
-from ..exception import SaTokenException
+from ..context import get_current_login_id, set_current
+from ..exception import NotLoginException, NotLoginType, SaTokenException
 from ..permission import MatchMode
 from ..stp_util import get_manager
 
@@ -117,6 +118,8 @@ class SaTokenMiddleware(BaseHTTPMiddleware):
 
         request.state.sa_token = ctx.state.get("stp_token")
         request.state.sa_login_id = ctx.state.get("stp_login_id")
+        if request.state.sa_login_id:
+            request.state.sa_login_type = self.login_type
         return await call_next(request)
 
 
@@ -141,21 +144,36 @@ async def _authorize(
     permissions: list[str] | None = None,
     roles: list[str] | None = None,
     mode: MatchMode = "OR",
+    login_type: str = "login",
 ) -> tuple[str, str | None]:
+    cached_login_id = getattr(request.state, "sa_login_id", None)
+    cached_login_type = getattr(request.state, "sa_login_type", None)
+    if (
+        isinstance(cached_login_id, str)
+        and cached_login_id
+        and cached_login_type == login_type
+        and not permissions
+        and not roles
+    ):
+        cached_token = getattr(request.state, "sa_token", None)
+        return cached_login_id, cached_token if isinstance(cached_token, str) else None
+
     ctx = StarletteHttpContext(request)
     rule = build_rule(permissions=permissions, roles=roles, mode=mode)
-    result = await run_auth_flow(ctx, get_manager(), rule)
-    assert result.login_id is not None
+    result = await run_auth_flow(ctx, get_manager(), rule, login_type=login_type)
+    if result.login_id is None:
+        raise NotLoginException(NotLoginType.NOT_TOKEN, login_type=login_type)
     request.state.sa_login_id = result.login_id
     request.state.sa_token = result.token
+    request.state.sa_login_type = login_type
     return result.login_id, result.token
 
 
-def check_login() -> Callable[[Request], Awaitable[str]]:
+def check_login(*, login_type: str = "login") -> Callable[[Request], Awaitable[str]]:
     """Depends 扩展：``Depends(check_login())``。标准写法是 ``@sa.check_login``。"""
 
     async def dependency(request: Request) -> str:
-        login_id, _ = await _authorize(request)
+        login_id, _ = await _authorize(request, login_type=login_type)
         return login_id
 
     return dependency
@@ -164,21 +182,31 @@ def check_login() -> Callable[[Request], Awaitable[str]]:
 def check_permission(
     *permissions: str,
     mode: MatchMode = "OR",
+    login_type: str = "login",
 ) -> Callable[[Request], Awaitable[str]]:
     """Depends 扩展：``Depends(check_permission("order:delete"))``。"""
 
     async def dependency(request: Request) -> str:
-        login_id, _ = await _authorize(request, permissions=list(permissions), mode=mode)
+        login_id, _ = await _authorize(
+            request,
+            permissions=list(permissions),
+            mode=mode,
+            login_type=login_type,
+        )
         return login_id
 
     return dependency
 
 
-def check_role(*roles: str, mode: MatchMode = "OR") -> Callable[[Request], Awaitable[str]]:
+def check_role(
+    *roles: str,
+    mode: MatchMode = "OR",
+    login_type: str = "login",
+) -> Callable[[Request], Awaitable[str]]:
     """Depends 扩展：``Depends(check_role("admin"))``。"""
 
     async def dependency(request: Request) -> str:
-        login_id, _ = await _authorize(request, roles=list(roles), mode=mode)
+        login_id, _ = await _authorize(request, roles=list(roles), mode=mode, login_type=login_type)
         return login_id
 
     return dependency
@@ -187,23 +215,29 @@ def check_role(*roles: str, mode: MatchMode = "OR") -> Callable[[Request], Await
 def check_disable(
     service: str = "login",
     level: int = 1,
+    *,
+    login_type: str = "login",
 ) -> Callable[[Request], Awaitable[str]]:
     """Depends 扩展：``Depends(check_disable("comment"))``。"""
 
     async def dependency(request: Request) -> str:
-        login_id, _ = await _authorize(request)
-        await get_manager().stp().check_disable(login_id, service=service, level=level)
+        login_id, _ = await _authorize(request, login_type=login_type)
+        await get_manager().stp(login_type).check_disable(login_id, service=service, level=level)
         return login_id
 
     return dependency
 
 
-def check_safe(business: str) -> Callable[[Request], Awaitable[str]]:
+def check_safe(
+    business: str,
+    *,
+    login_type: str = "login",
+) -> Callable[[Request], Awaitable[str]]:
     """Depends 扩展：``Depends(check_safe("pay"))``。"""
 
     async def dependency(request: Request) -> str:
-        login_id, token = await _authorize(request)
-        await get_manager().stp().check_safe(token, business)
+        login_id, token = await _authorize(request, login_type=login_type)
+        await get_manager().stp(login_type).check_safe(token, business)
         return login_id
 
     return dependency
@@ -219,9 +253,16 @@ async def current_login_id_or_none(request: Request) -> str | None:
     """Depends 扩展：未登录时返回 None。"""
     ctx = StarletteHttpContext(request)
     token = resolve_token(ctx, get_manager())
-    return await get_manager().stp().get_login_id_or_none(token)
+    login_id = await get_manager().stp().get_login_id_or_none(token)
+    set_current(token, login_id)
+    request.state.sa_token = token
+    request.state.sa_login_id = login_id
+    return login_id
 
 
 async def current_token(request: Request) -> str | None:
     """Depends 扩展：只取 token，不做校验。"""
-    return resolve_token(StarletteHttpContext(request), get_manager())
+    previous_login_id = get_current_login_id()
+    token = resolve_token(StarletteHttpContext(request), get_manager())
+    set_current(token, previous_login_id)
+    return token

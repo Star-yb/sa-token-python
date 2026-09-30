@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -28,6 +30,8 @@ if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
     from ..manager import SaTokenManager
 
 __all__ = ["OnlineUser", "OnlineManager", "WebSocketAuthenticator"]
+
+logger = logging.getLogger("sa_token.online")
 
 #: 推送回调：接收 (连接对象, 消息文本)。
 Sender = Callable[[Any, str], Awaitable[None]]
@@ -93,7 +97,7 @@ class OnlineManager:
         device: str = "default",
     ) -> OnlineUser:
         """登记一条在线连接。"""
-        resolved_id = connection_id or f"{id(connection):x}"
+        resolved_id = connection_id or uuid.uuid4().hex
         user = OnlineUser(
             login_id=login_id,
             device=device,
@@ -125,8 +129,8 @@ class OnlineManager:
         if user is None:
             return False
         user.last_heartbeat = now_ms()
-        await self._storage.set(key, user.to_json(), self.heartbeat_timeout)
-        return True
+        updated = user.to_json()
+        return await self._storage.compare_and_set(key, raw, updated, self.heartbeat_timeout)
 
     async def is_online(self, login_id: str) -> bool:
         cursor: str | None = None
@@ -165,8 +169,8 @@ class OnlineManager:
             try:
                 await self._sender(connection, message)
                 sent += 1
-            except Exception:
-                # 推送失败通常意味着连接已断，交给连接自身的清理流程处理。
+            except Exception as exc:
+                logger.warning("在线连接推送失败：login_id=%s", login_id, exc_info=exc)
                 continue
         return sent
 
@@ -179,14 +183,16 @@ class OnlineManager:
             user.connection_id for user in online_users if user.device == device
         }
         sent = 0
-        local = self._connections.get(login_id, {})
-        for connection_id, connection in local.items():
+        async with self._lock:
+            local = list(self._connections.get(login_id, {}).items())
+        for connection_id, connection in local:
             if connection_id not in allowed_ids:
                 continue
             try:
                 await self._sender(connection, message)
                 sent += 1
-            except Exception:
+            except Exception as exc:
+                logger.warning("在线连接推送失败：login_id=%s device=%s", login_id, device, exc_info=exc)
                 continue
         return sent
 
@@ -199,10 +205,10 @@ class OnlineManager:
         await self._manager.stp().kickout(login_id)
 
     async def disconnect_user(self, login_id: str) -> None:
-        connections = self.local_connections(login_id)
         async with self._lock:
-            connection_ids = list(self._connections.get(login_id, {}).keys())
-            self._connections.pop(login_id, None)
+            bucket = self._connections.pop(login_id, {})
+            connection_ids = list(bucket.keys())
+            connections = list(bucket.values())
         for connection_id in connection_ids:
             await self._storage.delete(self._key(login_id, connection_id))
         if self._closer is None:
@@ -210,7 +216,8 @@ class OnlineManager:
         for connection in connections:
             try:
                 await self._closer(connection)
-            except Exception:
+            except Exception as exc:
+                logger.warning("关闭在线连接失败：login_id=%s", login_id, exc_info=exc)
                 continue
 
     async def disconnect_device(self, login_id: str, device: str) -> None:
@@ -234,25 +241,39 @@ class OnlineManager:
             for connection in connections:
                 try:
                     await self._closer(connection)
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "关闭在线连接失败：login_id=%s device=%s", login_id, device, exc_info=exc
+                    )
                     continue
 
     async def cleanup_stale_connections(self) -> int:
         """清理 Storage TTL 已过期、但本进程仍残留的连接对象。"""
-        stale: list[tuple[str, str, Any]] = []
         async with self._lock:
-            for login_id, bucket in list(self._connections.items()):
-                for connection_id, connection in list(bucket.items()):
-                    if not await self._storage.exists(self._key(login_id, connection_id)):
-                        stale.append((login_id, connection_id, connection))
-                        bucket.pop(connection_id, None)
+            candidates = [
+                (login_id, connection_id)
+                for login_id, bucket in self._connections.items()
+                for connection_id in bucket
+            ]
+        missing: list[tuple[str, str]] = []
+        for login_id, connection_id in candidates:
+            if not await self._storage.exists(self._key(login_id, connection_id)):
+                missing.append((login_id, connection_id))
+        stale: list[Any] = []
+        async with self._lock:
+            for login_id, connection_id in missing:
+                bucket = self._connections.get(login_id)
+                if bucket is None or connection_id not in bucket:
+                    continue
+                stale.append(bucket.pop(connection_id))
                 if not bucket:
                     self._connections.pop(login_id, None)
         if self._closer is not None:
-            for _, _, connection in stale:
+            for connection in stale:
                 try:
                     await self._closer(connection)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("关闭过期在线连接失败", exc_info=exc)
                     continue
         return len(stale)
 

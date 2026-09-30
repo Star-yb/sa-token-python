@@ -87,10 +87,27 @@ def test_cut_token_prefix(raw: str | None, expected: str | None) -> None:
         ("/health", "/health", True),
         ("/health", "/healthz", False),
         ("/api/*/detail", "/api/user/detail", True),
+        ("/public/**", "/public/../admin/user", False),
+        ("/admin/**", "/public/../admin/user", True),
+        ("/**", "/../etc/passwd", True),
+        ("/public/**", "/../etc/passwd", False),
     ],
 )
 def test_ant_match(pattern: str, path: str, expected: bool) -> None:
     assert ant_match(pattern, path) is expected
+
+
+def test_catch_all_login_covers_path_above_root() -> None:
+    path_auth = PathAuthConfig().ignore("/public/**").login("/**")
+    rule = path_auth.resolve("/../admin", "GET")
+    assert rule.ignore is False
+    assert rule.require_login is True
+
+
+def test_path_auth_unmatched_path_stays_anonymous() -> None:
+    rule = PathAuthConfig().login("/admin/**").resolve("/public", "GET")
+    assert rule.require_login is False
+    assert rule.permissions == []
 
 
 def test_path_auth_filters_by_http_method() -> None:
@@ -131,6 +148,37 @@ def test_path_auth_merges_matching_rules() -> None:
     rule = path_auth.resolve("/admin/user/list", "GET")
     assert rule.require_login is True
     assert rule.permissions == ["user:manage"]
+
+
+def test_path_auth_keeps_match_mode_on_each_group() -> None:
+    path_auth = (
+        PathAuthConfig()
+        .permission("/x", "a", "b", mode="OR")
+        .role("/x", "r1", "r2", mode="AND")
+    )
+    rule = path_auth.resolve("/x", "GET")
+    assert [(group.values, group.mode) for group in rule.permission_groups] == [(["a", "b"], "OR")]
+    assert [(group.values, group.mode) for group in rule.role_groups] == [(["r1", "r2"], "AND")]
+    assert rule.mode == "OR"
+
+
+async def test_path_auth_does_not_apply_role_and_to_permissions(manager) -> None:
+    path_auth = (
+        PathAuthConfig()
+        .permission("/x", "a", "b", mode="OR")
+        .role("/x", "r1", "r2", mode="AND")
+    )
+    token = await manager.stp().login(10001)
+    await manager.stp().set_permissions(10001, ["a"])
+    await manager.stp().set_roles(10001, ["r1", "r2"])
+    ctx = SimpleHttpContext(
+        path="/x",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    result = await run_path_auth(ctx, manager, path_auth)
+
+    assert result.login_id == "10001"
 
 
 async def test_run_auth_flow_binds_state(manager) -> None:

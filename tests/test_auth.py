@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from sa_token import (
     NotLoginException,
     NotLoginType,
+    SaToken,
     SaTokenException,
     StpUtil,
     sa_token_context,
@@ -175,7 +178,74 @@ async def test_login_types_are_isolated(manager) -> None:
     assert await manager.stp("user").is_login(admin_token) is False
 
 
+async def test_search_keyword_does_not_act_as_glob(stp) -> None:
+    token = await stp.login(10001)
+    assert await stp.search_token_value("*") == []
+    assert token in await stp.search_token_value(token[:6])
+
+
 async def test_search_token_value(stp) -> None:
     token = await stp.login(10001)
     found = await stp.search_token_value()
     assert token in found
+
+
+async def test_concurrent_login_keeps_both_terminals(stp) -> None:
+    web, app = await asyncio.gather(
+        stp.login("10001", device="web"),
+        stp.login("10001", device="app"),
+    )
+    assert await stp.is_login(web) is True
+    assert await stp.is_login(app) is True
+    session = await stp.get_session("10001")
+    assert session is not None
+    tokens = {item.token for item in session.terminal_list}
+    assert {web, app} <= tokens
+    session.terminal_list.clear()
+    assert {web, app} <= {item.token for item in session.terminal_list}
+
+
+def test_build_requires_explicit_storage() -> None:
+    with pytest.raises(ValueError, match="未配置 Storage"):
+        SaToken.builder().print_banner(False).build()
+
+
+def test_run_sync_reports_cancelled_loop_as_runtime_error() -> None:
+    import asyncio
+
+    from sa_token.sync import run_sync, shutdown_sync_loop
+
+    async def pending() -> None:
+        return None
+
+    class ClosedLoop:
+        def __init__(self, coro) -> None:
+            self._coro = coro
+
+        def result(self, timeout: float | None = None) -> None:
+            self._coro.close()
+            raise asyncio.CancelledError
+
+    original = asyncio.run_coroutine_threadsafe
+    asyncio.run_coroutine_threadsafe = lambda coro, loop: ClosedLoop(coro)
+    try:
+        with pytest.raises(RuntimeError, match="后台事件循环已停止"):
+            run_sync(pending())
+    finally:
+        asyncio.run_coroutine_threadsafe = original
+        shutdown_sync_loop()
+
+
+def test_run_sync_times_out() -> None:
+    import asyncio
+
+    from sa_token.sync import run_sync, shutdown_sync_loop
+
+    async def hang() -> None:
+        await asyncio.sleep(30)
+
+    try:
+        with pytest.raises(RuntimeError, match="同步调用超时"):
+            run_sync(hang(), timeout=0.05)
+    finally:
+        shutdown_sync_loop()

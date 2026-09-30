@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING
 from ..context import set_current
 from ..permission import MatchMode
 from ..token_io import read_token
-from .path import PathAuthConfig, PathRule
+from .path import CheckGroup, PathAuthConfig, PathRule
 
 if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
     from ..manager import SaTokenManager
     from .http import HttpContext
 
-__all__ = ["AuthResult", "resolve_token", "run_auth_flow", "run_path_auth"]
+__all__ = ["AuthResult", "build_rule", "resolve_token", "run_auth_flow", "run_path_auth"]
 
 
 @dataclass
@@ -57,10 +57,17 @@ async def run_auth_flow(
     logic = manager.stp(login_type)
     login_id = await logic.check_login(token)
 
-    if rule.permissions:
-        await logic.check_permission(login_id, rule.permissions, mode=rule.mode)
-    if rule.roles:
-        await logic.check_role(login_id, rule.roles, mode=rule.mode)
+    permission_groups = list(rule.permission_groups)
+    if not permission_groups and rule.permissions:
+        permission_groups = [CheckGroup(list(rule.permissions), rule.mode)]
+    for group in permission_groups:
+        await logic.check_permission(login_id, group.values, mode=group.mode)
+
+    role_groups = list(rule.role_groups)
+    if not role_groups and rule.roles:
+        role_groups = [CheckGroup(list(rule.roles), rule.mode)]
+    for group in role_groups:
+        await logic.check_role(login_id, group.values, mode=group.mode)
 
     ctx.state["stp_login_id"] = login_id
     ctx.state["stp_token"] = token

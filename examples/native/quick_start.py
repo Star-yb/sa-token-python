@@ -42,7 +42,8 @@ async def main() -> None:
 
     print("== Session ==")
     session = await StpUtil.get_session("10001")
-    assert session is not None
+    if session is None:
+        raise RuntimeError("登录后应能取得账号 Session")
     await session.set("nickname", "alice")
     print(f"  nickname = {await session.get('nickname')}")
 
@@ -64,8 +65,11 @@ async def main() -> None:
     try:
         await StpUtil.check_login(token)
     except NotLoginException as exc:
-        assert exc.type is NotLoginType.KICK_OUT
+        if exc.type is not NotLoginType.KICK_OUT:
+            raise AssertionError(f"expected KICK_OUT, got {exc.type}")
         print(f"  被踢原因可追溯 -> {exc.type.value}")
+    else:
+        raise AssertionError("expected NotLoginException")
     print(f"  app 端同样下线 -> {await StpUtil.is_login(app_token)}")
 
     print("== 封禁 ==")

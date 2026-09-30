@@ -9,11 +9,13 @@ import pytest
 
 fastapi = pytest.importorskip("fastapi")
 
-from fastapi import Depends, FastAPI, Response, WebSocket  # noqa: E402
+from fastapi import Depends, FastAPI, Request, Response, WebSocket  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 from sa_token import StpUtil  # noqa: E402
 from sa_token.adapter import PathAuthConfig  # noqa: E402
+from sa_token.context import get_current_login_id  # noqa: E402
 from sa_token.integration.fastapi import (  # noqa: E402
     BearerLoginId,
     SaTokenFastAPI,
@@ -23,6 +25,7 @@ from sa_token.integration.fastapi import (  # noqa: E402
     check_role,
     current_login_id,
     current_login_id_or_none,
+    current_token,
     delete_token_cookie,
     install_exception_handlers,
     set_token_cookie,
@@ -97,6 +100,98 @@ def test_decorator_login_then_access(client) -> None:
     response = client.get("/decorated/me", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert response.json()["login_id"] == "10001"
+
+
+def test_decorator_accepts_var_keyword_endpoint(manager) -> None:
+    app = FastAPI()
+    sa = SaTokenFastAPI(app)
+
+    @app.get("/kwargs")
+    @sa.check_login
+    async def handler(**kwargs: object) -> dict:
+        return {"keys": sorted(kwargs)}
+
+    with TestClient(app) as test_client:
+        response = test_client.get("/kwargs")
+    assert response.status_code == 401
+
+
+class _CreateSchema(BaseModel):
+    name: str
+
+
+def test_decorator_treats_request_body_name_as_payload(manager) -> None:
+    app = FastAPI()
+    sa = SaTokenFastAPI(app)
+
+    @app.post("/login/{login_id}")
+    async def login(login_id: str) -> dict:
+        return {"token": await StpUtil.login(login_id)}
+
+    @app.post("/items")
+    @sa.check_login
+    async def create(request: _CreateSchema) -> dict:
+        return {"name": request.name}
+
+    with TestClient(app) as test_client:
+        missing = test_client.post("/items", json={"name": "book"})
+        assert missing.status_code == 401
+        token = test_client.post("/login/10001").json()["token"]
+        accepted = test_client.post(
+            "/items",
+            json={"name": "book"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert accepted.status_code == 200
+    assert accepted.json()["name"] == "book"
+
+
+def test_decorator_runs_sync_endpoint_off_the_event_loop(manager) -> None:
+    import asyncio
+
+    app = FastAPI()
+    sa = SaTokenFastAPI(app)
+
+    @app.post("/login/{login_id}")
+    async def login(login_id: str) -> dict:
+        return {"token": await StpUtil.login(login_id)}
+
+    @app.get("/sync")
+    @sa.check_login
+    def sync_view() -> dict:
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        return {"on_loop": on_loop}
+
+    with TestClient(app) as test_client:
+        token = test_client.post("/login/10001").json()["token"]
+        response = test_client.get("/sync", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert response.json()["on_loop"] is False
+
+
+def test_current_token_keeps_login_id(manager) -> None:
+    app = FastAPI()
+    install_exception_handlers(app)
+    app.add_middleware(SaTokenMiddleware)
+
+    @app.post("/login/{login_id}")
+    async def login(login_id: str) -> dict:
+        return {"token": await StpUtil.login(login_id)}
+
+    @app.get("/both")
+    async def both(request: Request, login_id: str = Depends(current_login_id)) -> dict:
+        await current_token(request)
+        return {"login_id": get_current_login_id(), "checked": login_id}
+
+    with TestClient(app) as test_client:
+        token = test_client.post("/login/10001").json()["token"]
+        response = test_client.get("/both", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    assert response.json() == {"login_id": "10001", "checked": "10001"}
 
 
 def test_decorator_requires_login(client) -> None:

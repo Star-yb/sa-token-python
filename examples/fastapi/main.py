@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from sa_token import SaToken, SaTokenException, StpUtil, get_manager
+from sa_token import NotLoginException, NotLoginType, SaToken, SaTokenException, StpUtil, get_manager
 from sa_token.integration.fastapi import (
     BearerLoginId,
     LoginId,
@@ -47,6 +47,10 @@ class LoginRequest(BaseModel):
 
 class RefreshRequest(BaseModel):
     refresh_token: str
+
+
+class OpenSafeRequest(BaseModel):
+    password: str
 
 
 async def send_websocket(websocket: WebSocket, message: str) -> None:
@@ -115,9 +119,13 @@ async def pay(_: str = Depends(check_safe("pay"))) -> dict:
 
 
 @app.post("/open-safe")
-async def open_safe(login_id: LoginId) -> dict:
+async def open_safe(payload: OpenSafeRequest, login_id: LoginId) -> dict:
+    """二级认证必须再次确认密码。只凭登录态调用等于没有保护。"""
+    if payload.password != "123456":
+        return {"code": 400, "message": "密码错误"}
     token = StpUtil.get_token_value()
-    assert token is not None
+    if token is None:
+        raise NotLoginException(NotLoginType.NOT_TOKEN)
     await StpUtil.open_safe(token, "pay", 300)
     return {"ok": True}
 
@@ -159,6 +167,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await online.heartbeat(login_id, connection.connection_id)
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
+        pass
+    finally:
         await online.unregister(login_id, connection.connection_id)
 
 

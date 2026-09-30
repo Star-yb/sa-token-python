@@ -30,50 +30,76 @@ _loop_thread: threading.Thread | None = None
 _loop_lock = threading.Lock()
 
 
+def _ensure_background_loop() -> asyncio.AbstractEventLoop:
+    """在已持有 ``_loop_lock`` 时确保后台循环存在。"""
+    global _loop, _loop_thread
+    if _loop is not None and not _loop.is_closed():
+        return _loop
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(
+        target=loop.run_forever,
+        name="sa-token-sync-loop",
+        daemon=True,
+    )
+    thread.start()
+    _loop, _loop_thread = loop, thread
+    return loop
+
+
 def _get_background_loop() -> asyncio.AbstractEventLoop:
     """懒启动一个后台事件循环，供同步代码复用。
 
     每次调用都新建 loop 的话，``MemoryStorage`` 里的 ``asyncio.Lock`` 会绑定到
     已关闭的 loop 上并报错；共用一个常驻 loop 可以规避这个问题。
     """
-    global _loop, _loop_thread
     with _loop_lock:
-        if _loop is not None and not _loop.is_closed():
-            return _loop
-        loop = asyncio.new_event_loop()
-        thread = threading.Thread(
-            target=loop.run_forever,
-            name="sa-token-sync-loop",
-            daemon=True,
-        )
-        thread.start()
-        _loop, _loop_thread = loop, thread
-        return loop
+        return _ensure_background_loop()
 
 
 def shutdown_sync_loop() -> None:
-    """关闭后台事件循环，一般只在测试或进程退出时调用。"""
+    """关闭后台事件循环。只适合测试或进程退出，不要在请求处理中调用。"""
     global _loop, _loop_thread
     with _loop_lock:
         if _loop is None:
             return
-        _loop.call_soon_threadsafe(_loop.stop)
+        loop = _loop
+
+        async def _cancel_pending() -> None:
+            current = asyncio.current_task()
+            pending = [task for task in asyncio.all_tasks(loop) if task is not current]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(_cancel_pending(), loop).result(timeout=5)
+        loop.call_soon_threadsafe(loop.stop)
         if _loop_thread is not None:
             _loop_thread.join(timeout=5)
-        _loop.close()
+        loop.close()
         _loop, _loop_thread = None, None
 
 
-def run_sync(coro: Coroutine[Any, Any, _T]) -> _T:
+def run_sync(coro: Coroutine[Any, Any, _T], *, timeout: float = 30) -> _T:
     """在同步代码里执行协程。
 
     已经处于事件循环中时直接调用会死锁，因此这里明确报错而不是悄悄挂起——
-    异步环境请直接 ``await`` 异步版 API。
+    异步环境请直接 ``await`` 异步版 API。调用会阻塞当前线程，最多等待
+    ``timeout`` 秒，超时后取消后台协程并抛出 ``RuntimeError``。
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run_coroutine_threadsafe(coro, _get_background_loop()).result()
+        with _loop_lock:
+            future = asyncio.run_coroutine_threadsafe(coro, _ensure_background_loop())
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError as exc:
+            future.cancel()
+            raise RuntimeError(f"同步调用超时：后台事件循环在 {timeout} 秒内没有返回") from exc
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("同步调用被取消：后台事件循环已停止") from exc
     coro.close()
     raise RuntimeError(
         "run_sync 不能在事件循环中调用，异步环境请直接 await StpUtil 的异步方法"

@@ -48,6 +48,7 @@ class MemoryStorage:
 
     async def get(self, key: str) -> str | None:
         async with self._lock:
+            self._maybe_cleanup()
             return self._get_unlocked(key)
 
     async def set(self, key: str, value: str, ttl: int | None = None) -> None:
@@ -117,13 +118,19 @@ class MemoryStorage:
         count: int = 100,
     ) -> tuple[str | None, list[str]]:
         async with self._lock:
+            self._maybe_cleanup()
             now = time.monotonic()
             keys = sorted(
                 key
                 for key, entry in self._data.items()
                 if not entry.is_expired(now) and fnmatch.fnmatchcase(key, pattern)
             )
-        start = int(cursor) if cursor else 0
+        try:
+            start = int(cursor) if cursor else 0
+        except (ValueError, TypeError):
+            start = 0
+        if start < 0:
+            start = 0
         page = keys[start : start + count]
         next_cursor = str(start + count) if start + count < len(keys) else None
         return next_cursor, page

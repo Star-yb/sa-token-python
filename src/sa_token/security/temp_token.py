@@ -42,17 +42,23 @@ class TempTokenManager:
         self._storage = storage
         self._key_prefix = key_prefix
 
+    def _require_namespace(self, namespace: str) -> None:
+        if not namespace or ":" in namespace:
+            raise SecurityException("INVALID_TEMP_NAMESPACE", "namespace 不能为空或包含冒号")
+
     def _key(self, namespace: str, token: str) -> str:
+        self._require_namespace(namespace)
+        if not token or ":" in token:
+            raise SecurityException("INVALID_TEMP_TOKEN", "token 不能为空或包含冒号")
         return f"{self._key_prefix}security:temp:{namespace}:{token}"
 
     def _index_key(self, namespace: str, value: str) -> str:
+        self._require_namespace(namespace)
         digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
         return f"{self._key_prefix}security:temp-index:{namespace}:{digest}"
 
-    @staticmethod
-    def _validate(namespace: str, timeout: int) -> None:
-        if not namespace or ":" in namespace:
-            raise SecurityException("INVALID_TEMP_NAMESPACE", "namespace 不能为空或包含冒号")
+    def _validate(self, namespace: str, timeout: int) -> None:
+        self._require_namespace(namespace)
         if timeout == 0 or timeout < -1:
             raise SecurityException("INVALID_TEMP_TIMEOUT", "timeout 必须为正数或 -1")
 
@@ -66,6 +72,8 @@ class TempTokenManager:
     ) -> str:
         """创建临时 Token；``record_index`` 可按字符串业务值反查最新 Token。"""
         self._validate(namespace, timeout)
+        if value is None:
+            raise SecurityException("TEMP_TOKEN_VALUE_NONE", "value 不能为 None")
         record = TempTokenRecord(value=value, namespace=namespace, created_at=now_ms())
         ttl = None if timeout == -1 else timeout
         for _ in range(12):
@@ -76,7 +84,11 @@ class TempTokenManager:
                 ttl,
             ):
                 if record_index and isinstance(value, str):
-                    await self._storage.set(self._index_key(namespace, value), token, ttl)
+                    index_key = self._index_key(namespace, value)
+                    previous = await self._storage.get(index_key)
+                    if previous and previous != token:
+                        await self._storage.delete(self._key(namespace, previous))
+                    await self._storage.set(index_key, token, ttl)
                 return token
         raise SecurityException("TEMP_TOKEN_ALLOCATION_FAILED", "无法分配唯一临时 token")
 
@@ -89,10 +101,12 @@ class TempTokenManager:
         """原子读取并销毁；并发重复提交时恰好一个调用取得业务值。"""
         key = self._key(namespace, token)
         raw = await self._storage.get(key)
-        if raw is None or not await self._storage.compare_and_delete(key, raw):
+        if raw is None:
             return None
         record = TempTokenRecord.from_json(raw)
         if record is None:
+            return None
+        if not await self._storage.compare_and_delete(key, raw):
             return None
         if isinstance(record.value, str):
             index_key = self._index_key(namespace, record.value)

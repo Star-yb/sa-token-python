@@ -32,9 +32,17 @@ def set_manager(manager: SaTokenManager) -> None:
 
 
 def get_manager() -> SaTokenManager:
-    if _manager is None:
+    manager = _manager
+    if manager is None:
         raise SaTokenNotInitializedException()
-    return _manager
+    return manager
+
+
+def _nonce_subject(subject: Any) -> str:
+    """与 NonceManager 使用同一套主体：None 不当成字符串 ``"None"``。"""
+    if subject is None:
+        return ""
+    return str(subject).strip()
 
 
 def clear_manager() -> None:
@@ -331,13 +339,13 @@ class StpUtil:
 
     @staticmethod
     async def issue_nonce(subject: Any, *, purpose: str = "default") -> str:
-        return await get_manager().nonces.issue(str(subject), purpose=purpose)
+        return await get_manager().nonces.issue(_nonce_subject(subject), purpose=purpose)
 
     @staticmethod
     async def consume_nonce(
         nonce: str, subject: Any, *, purpose: str = "default"
     ) -> None:
-        await get_manager().nonces.consume(nonce, str(subject), purpose=purpose)
+        await get_manager().nonces.consume(nonce, _nonce_subject(subject), purpose=purpose)
 
     @staticmethod
     async def create_temp_token(

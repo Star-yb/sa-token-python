@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 import inspect
 from collections.abc import Callable
-from typing import Annotated, Any, TypeVar
+from typing import Annotated, Any, TypeVar, get_args, get_origin, get_type_hints
 
 try:
     from fastapi import Depends, FastAPI, Request, Response, WebSocket
@@ -20,9 +20,10 @@ try:
         HTTPAuthorizationCredentials,
         HTTPBearer,
     )
+    from starlette.concurrency import run_in_threadpool
 except ImportError as exc:  # pragma: no cover - 依赖缺失路径
     raise ImportError(
-        '该模块需要 fastapi，请执行：pip install "sa-token-python-core[fastapi]"'
+        "该模块需要 fastapi，请执行：pip install fastapi"
     ) from exc
 
 from ..adapter.path import PathAuthConfig
@@ -86,16 +87,57 @@ def _extract_request(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Request:
     raise RuntimeError("未找到 Request")
 
 
-def _endpoint_signature(view: Callable[..., Any]) -> inspect.Signature:
-    signature = inspect.signature(view)
-    if "request" in signature.parameters:
-        return signature
-    request_param = inspect.Parameter(
-        "request",
-        inspect.Parameter.KEYWORD_ONLY,
-        annotation=Request,
+def _annotation_is_request(annotation: Any) -> bool:
+    if annotation is Request or annotation in {"Request", "starlette.requests.Request"}:
+        return True
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        args = get_args(annotation)
+        return bool(args) and _annotation_is_request(args[0])
+    return any(_annotation_is_request(arg) for arg in get_args(annotation))
+
+
+def _resolved_hints(view: Callable[..., Any]) -> dict[str, Any]:
+    try:
+        return get_type_hints(view)
+    except Exception:
+        return {}
+
+
+def _has_request_parameter(signature: inspect.Signature, hints: dict[str, Any]) -> bool:
+    return any(
+        _annotation_is_request(hints.get(param.name, param.annotation))
+        for param in signature.parameters.values()
     )
-    return signature.replace(parameters=[*signature.parameters.values(), request_param])
+
+
+def _endpoint_signature(view: Callable[..., Any]) -> tuple[inspect.Signature, str | None]:
+    """返回公布给 FastAPI 的签名，以及为注入 Request 新增的参数名。"""
+    signature = inspect.signature(view)
+    hints = _resolved_hints(view)
+    injected_name: str | None = None
+    params = [
+        param.replace(annotation=hints.get(param.name, param.annotation))
+        for param in signature.parameters.values()
+        if param.kind is not inspect.Parameter.VAR_KEYWORD
+    ]
+    if not _has_request_parameter(signature, hints):
+        injected_name = "request"
+        while any(param.name == injected_name for param in params):
+            injected_name = f"sa_{injected_name}"
+        request_param = inspect.Parameter(
+            injected_name,
+            inspect.Parameter.KEYWORD_ONLY,
+            annotation=Request,
+        )
+        var_positional = [
+            param for param in params if param.kind is inspect.Parameter.VAR_POSITIONAL
+        ]
+        if var_positional:
+            params.insert(params.index(var_positional[0]) + 1, request_param)
+        else:
+            params.append(request_param)
+    return signature.replace(parameters=params), injected_name
 
 
 class SaTokenFastAPI:
@@ -147,7 +189,7 @@ class SaTokenFastAPI:
         extra: Callable[[Any], Any] | None = None,
     ) -> Callable[[_F], _F]:
         def decorator(view: _F) -> _F:
-            had_request = "request" in inspect.signature(view).parameters
+            published, injected_name = _endpoint_signature(view)
 
             @functools.wraps(view)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -165,18 +207,16 @@ class SaTokenFastAPI:
                     extra_result = extra(result)
                     if inspect.isawaitable(extra_result):
                         await extra_result
-                call_kwargs = kwargs
+                call_kwargs = dict(kwargs)
                 call_args = args
-                if not had_request:
-                    call_kwargs = dict(kwargs)
-                    call_kwargs.pop("request", None)
+                if injected_name is not None:
+                    call_kwargs.pop(injected_name, None)
                     call_args = tuple(item for item in args if not isinstance(item, Request))
-                outcome = view(*call_args, **call_kwargs)
-                if inspect.isawaitable(outcome):
-                    return await outcome
-                return outcome
+                if inspect.iscoroutinefunction(view):
+                    return await view(*call_args, **call_kwargs)
+                return await run_in_threadpool(view, *call_args, **call_kwargs)
 
-            wrapper.__signature__ = _endpoint_signature(view)
+            wrapper.__signature__ = published
             return wrapper  # type: ignore[return-value]
 
         return decorator

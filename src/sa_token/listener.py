@@ -2,12 +2,15 @@
 
 监听器异常不会影响主流程——审计失败不该导致用户登录失败。
 事件载荷只带 token 指纹，避免把原始 token 写进日志文件。
+同步监听器在认证热路径上直接执行，必须保持非阻塞；数据库、HTTP、写文件
+这类阻塞操作应放到监听器自己的线程或任务里。
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -89,12 +92,24 @@ class EventBus:
     def clear(self) -> None:
         self._listeners.clear()
 
+    def copy(self) -> EventBus:
+        """复制已注册的监听器。后续 ``on`` 不会改到这份副本。"""
+        cloned = EventBus()
+        cloned._counter = self._counter
+        cloned._listeners = {
+            event: list(registrations) for event, registrations in self._listeners.items()
+        }
+        return cloned
+
     async def emit(self, data: EventData) -> None:
-        matched = [*self._listeners.get(data.event, []), *self._listeners.get(Event.ALL, [])]
+        """通知监听器。同步监听器在当前事件循环上直接调用，不能做阻塞 I/O。"""
+        matched = list(self._listeners.get(data.event, []))
+        if data.event is not Event.ALL:
+            matched.extend(self._listeners.get(Event.ALL, []))
         for registration in matched:
             try:
                 result = registration.listener(data)
-                if registration.is_async or asyncio.iscoroutine(result):
+                if registration.is_async or inspect.isawaitable(result):
                     await result
             except Exception:
                 logger.exception("sa-token 事件监听器执行失败：event=%s", data.event.value)

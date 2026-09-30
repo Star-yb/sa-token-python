@@ -1,6 +1,6 @@
 """Redis 存储：生产环境实现。
 
-需要额外安装：``pip install "sa-token-python-core[redis]"``。
+需要额外安装：``pip install "sa-token-python[redis]"``。
 """
 
 from __future__ import annotations
@@ -27,20 +27,25 @@ _COMPARE_AND_SET = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return 0
 end
-if tonumber(ARGV[3]) < 0 then
+local ttl = tonumber(ARGV[3])
+if ttl == 0 then
+    redis.call('DEL', KEYS[1])
+elseif ttl < 0 then
     redis.call('SET', KEYS[1], ARGV[2])
 else
-    redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ttl)
 end
 return 1
 """
 
 
 def _normalize_ttl(ttl: int | None) -> int | None:
-    """把 ``None`` / ``-1`` 统一成「不设置过期」。"""
+    """``None`` / ``-1`` 永不过期；``0`` 和其它负数立即过期，返回 ``0``。"""
     if ttl is None or ttl == TTL_NEVER_EXPIRE:
         return None
-    return max(1, ttl)
+    if ttl <= 0:
+        return 0
+    return ttl
 
 
 class RedisStorage:
@@ -62,7 +67,7 @@ class RedisStorage:
             from redis.asyncio import Redis
         except ImportError as exc:  # pragma: no cover - 依赖缺失路径
             raise ImportError(
-                'RedisStorage 需要 redis 依赖，请执行：pip install "sa-token-python-core[redis]"'
+                'RedisStorage 需要 redis 依赖，请执行：pip install "sa-token-python[redis]"'
             ) from exc
         kwargs.setdefault("decode_responses", True)
         return cls(Redis.from_url(url, **kwargs))
@@ -72,6 +77,9 @@ class RedisStorage:
 
     async def set(self, key: str, value: str, ttl: int | None = None) -> None:
         seconds = _normalize_ttl(ttl)
+        if seconds == 0:
+            await self._redis.delete(key)
+            return
         if seconds is None:
             await self._redis.set(key, value)
         else:
@@ -85,6 +93,9 @@ class RedisStorage:
 
     async def expire(self, key: str, ttl: int | None) -> bool:
         seconds = _normalize_ttl(ttl)
+        if seconds == 0:
+            deleted = await self._redis.delete(key)
+            return bool(deleted)
         if seconds is None:
             return bool(await self._redis.persist(key))
         return bool(await self._redis.expire(key, seconds))
@@ -94,6 +105,9 @@ class RedisStorage:
 
     async def set_if_absent(self, key: str, value: str, ttl: int | None = None) -> bool:
         seconds = _normalize_ttl(ttl)
+        if seconds == 0:
+            # 立即过期的值不会留下可占位的键。返回 True 会让两个并发调用都以为写入成功。
+            return False
         if seconds is None:
             return bool(await self._redis.set(key, value, nx=True))
         return bool(await self._redis.set(key, value, ex=seconds, nx=True))

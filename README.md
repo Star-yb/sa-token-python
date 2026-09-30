@@ -1,11 +1,18 @@
-# sa-token-python
+<h1 align="center">sa-token-python</h1>
 
 <p align="center">
-  <img src="docs/community.png" alt="加入讨论群" width="220" />
+  <strong>轻量级、有状态的 Python 认证鉴权框架</strong> · 灵感来源于 <a href="https://sa-token.cc/">Sa-Token</a>（Java），提供登录鉴权、踢人下线、权限与角色、路径鉴权、Session 和可插拔存储
 </p>
-<p align="center">扫码加入讨论群</p>
 
-轻量级、**有状态** 的 Python 认证鉴权框架，灵感来源于 [Sa-Token](https://sa-token.cc/)（Java）。
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white"></a>
+  <a href="https://pypi.org/project/sa-token-python/"><img alt="PyPI" src="https://img.shields.io/pypi/v/sa-token-python?logo=pypi&logoColor=white"></a>
+  <a href="https://github.com/Star-yb/sa-token-python/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue"></a>
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white">
+  <img alt="Flask" src="https://img.shields.io/badge/Flask-000000?logo=flask&logoColor=white">
+  <img alt="Django" src="https://img.shields.io/badge/Django-092E20?logo=django&logoColor=white">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue">
+</p>
 
 同族实现：[sa-token-go](https://github.com/sa-tokens/sa-token-go) · [sa-token-rust](https://github.com/sa-tokens/sa-token-rust) · [xlt-token](https://github.com/xiaoLangtou/xlt-token)（Node.js）
 
@@ -14,6 +21,11 @@
 ```python
 token = await StpUtil.login(user_id)
 ```
+
+<p align="center">
+  <img src="docs/community.png" alt="加入讨论群" width="220" />
+</p>
+<p align="center">扫码加入讨论群</p>
 
 ---
 

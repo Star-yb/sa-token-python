@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Coroutine
+from concurrent.futures import CancelledError as FuturesCancelledError
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, TypeVar
 
 from .model import TerminalInfo, TokenInfo
@@ -95,10 +97,11 @@ def run_sync(coro: Coroutine[Any, Any, _T], *, timeout: float = 30) -> _T:
             future = asyncio.run_coroutine_threadsafe(coro, _ensure_background_loop())
         try:
             return future.result(timeout=timeout)
-        except TimeoutError as exc:
+        except FuturesTimeoutError as exc:
+            # 3.10 上 concurrent.futures.TimeoutError 还不是内置 TimeoutError。
             future.cancel()
             raise RuntimeError(f"同步调用超时：后台事件循环在 {timeout} 秒内没有返回") from exc
-        except asyncio.CancelledError as exc:
+        except (asyncio.CancelledError, FuturesCancelledError) as exc:
             raise RuntimeError("同步调用被取消：后台事件循环已停止") from exc
     coro.close()
     raise RuntimeError(
